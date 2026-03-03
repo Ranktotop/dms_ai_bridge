@@ -23,7 +23,9 @@ from services.dms_rag_sync.SyncService import SyncService
 from services.rag_search.SearchService import SearchService
 from server.routers.WebhookRouter import router as webhook_router
 from server.routers.QueryRouter import router as query_router
+from server.routers.ChatRouter import router as chat_router
 from server.user_mapping.UserMappingService import UserMappingService
+from services.rag_search.agent.ReActAgent import ReActAgent
 
 logging = setup_logging()
 app_version = os.getenv("APP_VERSION", "unknown")
@@ -66,6 +68,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         cache_client=cache_client,
     )
     app.state.user_mapping_service = UserMappingService()
+    app.state.react_agent = ReActAgent(
+        helper_config=app.state.helper_config,
+        search_service=app.state.search_service,
+        llm_client=llm_client,
+    )
     logging.info("All services loaded successfully.", color="green")
 
     # while the app is running...
@@ -101,6 +108,7 @@ app.add_middleware(
 
 app.include_router(webhook_router)
 app.include_router(query_router)
+app.include_router(chat_router)
 
 
 async def check_connections(

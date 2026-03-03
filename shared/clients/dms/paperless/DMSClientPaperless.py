@@ -1,4 +1,7 @@
+import asyncio
+
 from shared.clients.dms.DMSClientInterface import DMSClientInterface
+from shared.clients.dms.models.DocumentUpdate import DocumentUpdateRequest
 from shared.helper.HelperConfig import HelperConfig
 from shared.models.config import EnvConfig
 from shared.clients.dms.models.Document import DocumentsListResponse, DocumentDetails
@@ -8,6 +11,11 @@ from shared.clients.dms.models.Owner import OwnersListResponse, OwnerDetails
 from shared.clients.dms.models.DocumentType import DocumentTypesListResponse, DocumentTypeDetails
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
+
+# How long to wait between task-status polls (seconds).
+_TASK_POLL_INTERVAL_S: float = 2.0
+# Maximum total time to wait for a task to complete before raising.
+_TASK_POLL_TIMEOUT_S: float = 120.0
 
 
 class DMSClientPaperless(DMSClientInterface):
@@ -109,8 +117,218 @@ class DMSClientPaperless(DMSClientInterface):
     
     def _get_endpoint_document_type_details(self, document_type_id: str) -> str:
         return f"/api/document_types/{document_type_id}/"
-    
-    
+
+    def _get_endpoint_upload(self) -> str:
+        return "/api/documents/post_document/"
+
+    def _get_endpoint_tasks(self) -> str:
+        return "/api/tasks/"
+
+    def _get_endpoint_create_correspondent(self) -> str:
+        return "/api/correspondents/"
+
+    def _get_endpoint_create_document_type(self) -> str:
+        return "/api/document_types/"
+
+    def _get_endpoint_create_tag(self) -> str:
+        return "/api/tags/"
+
+    def _get_endpoint_document_update(self, document_id: int) -> str:
+        return "/api/documents/%d/" % document_id
+
+    ##########################################
+    ############# WRITE REQUESTS #############
+    ##########################################
+
+    async def do_upload_document(
+        self,
+        file_bytes: bytes,
+        file_name: str,
+        title: str | None = None,
+        correspondent_id: int | None = None,
+        document_type_id: int | None = None,
+        tag_ids: list[int] | None = None,
+        owner_id: int | None = None,
+        created_date: str | None = None,
+    ) -> int:
+        """Upload a document to Paperless-ngx via multipart form POST."""
+        import mimetypes
+        mime_type, _ = mimetypes.guess_type(file_name)
+        mime_type = mime_type or "application/octet-stream"
+
+        files = [("document", (file_name, file_bytes, mime_type))]
+        data = {}
+        if title:
+            data["title"] = title
+        if correspondent_id is not None:
+            data["correspondent"] = str(correspondent_id)
+        if document_type_id is not None:
+            data["document_type"] = str(document_type_id)
+        if tag_ids:
+            data["tags"] = [str(t) for t in tag_ids]
+        if owner_id is not None:
+            data["owner"] = str(owner_id)
+        if created_date:
+            data["created_date"] = created_date
+
+        self.logging.info("Uploading document '%s' to Paperless-ngx...", file_name)
+        response = await self.do_request(
+            method="POST",
+            endpoint=self._get_endpoint_upload(),
+            files=files,
+            data=data,
+            raise_on_error=True,
+        )
+        result = response.json() if response.text else None
+
+        # Paperless returns an int document ID directly (older versions) or
+        # a celery task UUID string that must be polled until processing is done.
+        if isinstance(result, int):
+            self.logging.info(
+                "Document '%s' uploaded, id=%d", file_name, result
+            )
+            return result
+        elif isinstance(result, dict):
+            doc_id = int(result.get("id", 0))
+            self.logging.info("Document '%s' uploaded, id=%d", file_name, doc_id)
+            return doc_id
+        else:
+            task_uuid = str(result)
+            self.logging.info(
+                "Document '%s' accepted (task_id=%s), waiting for processing...",
+                file_name, task_uuid,
+            )
+            return await self._poll_task_document_id(task_uuid, file_name)
+
+    async def _poll_task_document_id(self, task_uuid: str, file_name: str) -> int:
+        """Poll GET /api/tasks/?task_id=<uuid> until the document ID is available.
+
+        Args:
+            task_uuid: Celery task UUID returned by /api/documents/post_document/.
+            file_name: Used for log messages only.
+
+        Returns:
+            The Paperless-ngx document ID once the task reaches SUCCESS.
+
+        Raises:
+            TimeoutError: If the task does not complete within _TASK_POLL_TIMEOUT_S.
+            RuntimeError: If the task ends in a FAILURE state.
+        """
+        elapsed = 0.0
+        while elapsed < _TASK_POLL_TIMEOUT_S:
+            await asyncio.sleep(_TASK_POLL_INTERVAL_S)
+            elapsed += _TASK_POLL_INTERVAL_S
+
+            response = await self.do_request(
+                method="GET",
+                endpoint=self._get_endpoint_tasks(),
+                params={"task_id": task_uuid},
+            )
+            tasks = response.json() if response.text else []
+            if not tasks:
+                self.logging.debug(
+                    "Task %s: no result yet (%.0fs elapsed)", task_uuid, elapsed
+                )
+                continue
+
+            task = tasks[0] if isinstance(tasks, list) else tasks
+            status = task.get("status", "")
+            related_document = task.get("related_document")
+
+            self.logging.debug(
+                "Task %s: status=%s, related_document=%s (%.0fs elapsed)",
+                task_uuid, status, related_document, elapsed,
+            )
+
+            if status == "SUCCESS" and related_document:
+                doc_id = int(related_document)
+                self.logging.info(
+                    "Document '%s' processed successfully, id=%d", file_name, doc_id
+                )
+                return doc_id
+
+            if status == "FAILURE":
+                result_msg = task.get("result", "unknown error")
+                if "duplicate" in result_msg.lower():
+                    raise FileExistsError(
+                        "Paperless-ngx task %s: duplicate document '%s': %s"
+                        % (task_uuid, file_name, result_msg)
+                    )
+                raise RuntimeError(
+                    "Paperless-ngx task %s failed for '%s': %s"
+                    % (task_uuid, file_name, result_msg)
+                )
+
+        raise TimeoutError(
+            "Paperless-ngx task %s for '%s' did not complete within %.0f seconds"
+            % (task_uuid, file_name, _TASK_POLL_TIMEOUT_S)
+        )
+
+    async def do_create_correspondent(self, name: str) -> int:
+        """Create a new correspondent in Paperless-ngx."""
+        response = await self.do_request(
+            method="POST",
+            endpoint=self._get_endpoint_create_correspondent(),
+            json={"name": name},
+            raise_on_error=True,
+        )
+        return int(response.json()["id"])
+
+    async def do_create_document_type(self, name: str) -> int:
+        """Create a new document type in Paperless-ngx."""
+        response = await self.do_request(
+            method="POST",
+            endpoint=self._get_endpoint_create_document_type(),
+            json={"name": name},
+            raise_on_error=True,
+        )
+        return int(response.json()["id"])
+
+    async def do_create_tag(self, name: str) -> int:
+        """Create a new tag in Paperless-ngx."""
+        response = await self.do_request(
+            method="POST",
+            endpoint=self._get_endpoint_create_tag(),
+            json={"name": name},
+            raise_on_error=True,
+        )
+        return int(response.json()["id"])
+
+    async def do_update_document(
+        self, document_id: int, update: DocumentUpdateRequest
+    ) -> bool:
+        """Update metadata fields of an existing document via PATCH."""
+        payload: dict = {}
+        if update.title is not None:
+            payload["title"] = update.title
+        if update.correspondent_id is not None:
+            payload["correspondent"] = update.correspondent_id
+        if update.document_type_id is not None:
+            payload["document_type"] = update.document_type_id
+        if update.tag_ids:
+            payload["tags"] = update.tag_ids
+        if update.content is not None:
+            payload["content"] = update.content
+        if update.created_date is not None:
+            payload["created"] = update.created_date
+        if update.owner_id is not None:
+            payload["owner"] = update.owner_id
+
+        if not payload:
+            return True
+
+        self.logging.info(
+            "Updating document id=%d in Paperless-ngx (fields: %s)...",
+            document_id, list(payload.keys()),
+        )
+        response = await self.do_request(
+            method="PATCH",
+            endpoint=self._get_endpoint_document_update(document_id),
+            json=payload,
+            raise_on_error=True,
+        )
+        return response.status_code in (200, 204)
+
     ##########################################
     ########### RESPONSE PARSER ##############
     ##########################################

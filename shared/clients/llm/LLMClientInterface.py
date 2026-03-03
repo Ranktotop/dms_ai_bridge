@@ -12,11 +12,12 @@ class LLMClientInterface(ClientInterface):
 
         # embedding config
         self.embed_distance = helper_config.get_string_val(f"{self.get_client_type().upper()}_DISTANCE", default="Cosine")
-        self.embed_model = helper_config.get_string_val(f"{self.get_client_type().upper()}_MODEL_EMBEDDING", default=None)
-        self.embed_model_max_chars = helper_config.get_number_val(f"{self.get_client_type().upper()}_MODEL_EMBEDDING_MAX_CHARS", default=None)
+        self.embed_model = helper_config.get_string_val(f"{self.get_client_type().upper()}_MODEL_EMBEDDING")
+        self.embed_model_max_chars = helper_config.get_number_val(f"{self.get_client_type().upper()}_MODEL_EMBEDDING_MAX_CHARS")
 
         # chat / completion config
-        self.chat_model = helper_config.get_string_val(f"{self.get_client_type().upper()}_MODEL_CHAT", default=None)
+        self.chat_model = helper_config.get_string_val(f"{self.get_client_type().upper()}_MODEL_CHAT")
+        self.vision_model = helper_config.get_string_val(f"{self.get_client_type().upper()}_MODEL_VISION")
 
     ##########################################
     ############### CHECKER ##################
@@ -29,6 +30,18 @@ class LLMClientInterface(ClientInterface):
     ################ GENERAL ##################
     def _get_client_type(self) -> str:
         return "llm"
+    
+    def get_vision_model(self) -> str | None:
+        """Return the configured vision model name, or None if not set."""
+        return self.vision_model
+    
+    def get_chat_model(self) -> str:
+        """Return the configured chat/completion model name."""
+        return self.chat_model
+    
+    def get_embed_model(self) -> str:
+        """Return the configured embedding model name."""
+        return self.embed_model
 
     ################ ENDPOINTS ##################
     @abstractmethod
@@ -180,6 +193,32 @@ class LLMClientInterface(ClientInterface):
             ValueError: If the response does not contain a valid reply.
         """
         body = self.get_chat_payload(messages)
+        response = await self.do_request(
+            method="POST",
+            endpoint=self._get_endpoint_chat(),
+            json=body,
+            raise_on_error=True,
+        )
+        return self.extract_chat_response(response.json())
+
+    async def do_chat_vision(self, messages: list[dict]) -> str:
+        """Send a chat/completion request to vision model.
+
+        Like do_chat(), but overrides self.chat_model with the vision model.
+
+        Args:
+            messages (list[dict]): OpenAI-format messages
+                (e.g. [{"role": "user", "content": [...]}]).
+
+        Returns:
+            str: The assistant reply text.
+
+        Raises:
+            Exception: If the HTTP request fails.
+            ValueError: If the response does not contain a valid reply.
+        """
+        body = self.get_chat_payload(messages)
+        body["model"] = self.get_vision_model()  # override model
         response = await self.do_request(
             method="POST",
             endpoint=self._get_endpoint_chat(),

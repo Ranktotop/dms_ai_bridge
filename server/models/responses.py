@@ -16,3 +16,8 @@ class SearchResponse(BaseModel):
     query: str
     results: list[SearchResultItem]
     total: int
+
+
+class ChatResponse(BaseModel):
+    query: str
+    answer: str

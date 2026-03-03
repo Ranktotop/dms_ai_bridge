@@ -6,6 +6,7 @@ from shared.clients.dms.models.Correspondent import CorrespondentBase, Correspon
 from shared.clients.dms.models.Tag import TagBase, TagDetails, TagsListResponse
 from shared.clients.dms.models.Owner import OwnerBase, OwnerDetails, OwnersListResponse
 from shared.clients.dms.models.DocumentType import DocumentTypeBase, DocumentTypeDetails, DocumentTypesListResponse
+from shared.clients.dms.models.DocumentUpdate import DocumentUpdateRequest
 from typing import Callable, TypeVar
 T = TypeVar("T")
 
@@ -425,6 +426,189 @@ class DMSClientInterface(ClientInterface):
         resp = await self.do_request(method="GET", endpoint=self._get_endpoint_document_type_details(document_type_id))
         document_type_details = self._parse_endpoint_document_type(resp.json())
         return document_type_details
+
+    ##########################################
+    ############# WRITE REQUESTS #############
+    ##########################################
+
+    @abstractmethod
+    async def do_upload_document(
+        self,
+        file_bytes: bytes,
+        file_name: str,
+        title: str | None = None,
+        correspondent_id: int | None = None,
+        document_type_id: int | None = None,
+        tag_ids: list[int] | None = None,
+        owner_id: int | None = None,
+        created_date: str | None = None,
+    ) -> int:
+        """Upload a document to the DMS backend.
+
+        Args:
+            file_bytes: Raw file content.
+            file_name: Original filename including extension.
+            title: Document title (optional).
+            correspondent_id: Existing correspondent ID (optional).
+            document_type_id: Existing document type ID (optional).
+            tag_ids: List of existing tag IDs (optional).
+            owner_id: DMS owner ID (optional).
+            created_date: Document date in ISO format YYYY-MM-DD (optional).
+
+        Returns:
+            int: The new DMS document ID.
+        """
+        pass
+
+    @abstractmethod
+    async def do_create_correspondent(self, name: str) -> int:
+        """Create a new correspondent in the DMS backend.
+
+        Args:
+            name: The correspondent name.
+
+        Returns:
+            int: The new correspondent ID.
+        """
+        pass
+
+    @abstractmethod
+    async def do_create_document_type(self, name: str) -> int:
+        """Create a new document type in the DMS backend.
+
+        Args:
+            name: The document type name.
+
+        Returns:
+            int: The new document type ID.
+        """
+        pass
+
+    @abstractmethod
+    async def do_create_tag(self, name: str) -> int:
+        """Create a new tag in the DMS backend.
+
+        Args:
+            name: The tag name.
+
+        Returns:
+            int: The new tag ID.
+        """
+        pass
+
+    @abstractmethod
+    async def do_update_document(
+        self, document_id: int, update: DocumentUpdateRequest
+    ) -> bool:
+        """Update metadata fields of an existing document.
+
+        Args:
+            document_id: The DMS document ID to update.
+            update: Fields to set. None values are omitted from the request.
+
+        Returns:
+            True on success.
+        """
+        pass
+
+    async def do_resolve_or_create_correspondent(self, name: str) -> int:
+        """Find existing correspondent by name in cache, or create a new one.
+
+        If the cache is empty it is loaded first. If creation fails (e.g. a unique
+        constraint because the item exists but was absent from the cache), the cache
+        is refreshed and the lookup retried before propagating the error.
+
+        Args:
+            name: The correspondent name to resolve or create.
+
+        Returns:
+            int: The correspondent ID (existing or newly created).
+        """
+        if not self._cache_correspondents:
+            await self.get_correspondents()
+        for corr_id, corr in (self._cache_correspondents or {}).items():
+            if corr.name and corr.name.lower() == name.lower():
+                self.logging.debug("Resolved correspondent '%s' → id=%s", name, corr_id)
+                return int(corr_id)
+        try:
+            new_id = await self.do_create_correspondent(name)
+            self.logging.info("Created new correspondent '%s' → id=%d", name, new_id)
+            if self._cache_correspondents is not None:
+                self._cache_correspondents[str(new_id)] = CorrespondentDetails(
+                    engine=self._get_engine_name(), id=str(new_id), name=name
+                )
+            return new_id
+        except Exception:
+            await self.get_correspondents(force=True)
+            for corr_id, corr in (self._cache_correspondents or {}).items():
+                if corr.name and corr.name.lower() == name.lower():
+                    self.logging.debug(
+                        "Resolved correspondent '%s' after cache refresh → id=%s", name, corr_id
+                    )
+                    return int(corr_id)
+            raise
+
+    async def do_resolve_or_create_document_type(self, name: str) -> int:
+        """Find existing document type by name in cache, or create a new one.
+
+        If the cache is empty it is loaded first. If creation fails (e.g. a unique
+        constraint because the item exists but was absent from the cache), the cache
+        is refreshed and the lookup retried before propagating the error.
+        """
+        if not self._cache_document_types:
+            await self.get_document_types()
+        for type_id, doc_type in (self._cache_document_types or {}).items():
+            if doc_type.name and doc_type.name.lower() == name.lower():
+                self.logging.debug("Resolved document_type '%s' → id=%s", name, type_id)
+                return int(type_id)
+        try:
+            new_id = await self.do_create_document_type(name)
+            self.logging.info("Created new document_type '%s' → id=%d", name, new_id)
+            if self._cache_document_types is not None:
+                self._cache_document_types[str(new_id)] = DocumentTypeDetails(
+                    engine=self._get_engine_name(), id=str(new_id), name=name
+                )
+            return new_id
+        except Exception:
+            await self.get_document_types(force=True)
+            for type_id, doc_type in (self._cache_document_types or {}).items():
+                if doc_type.name and doc_type.name.lower() == name.lower():
+                    self.logging.debug(
+                        "Resolved document_type '%s' after cache refresh → id=%s", name, type_id
+                    )
+                    return int(type_id)
+            raise
+
+    async def do_resolve_or_create_tag(self, name: str) -> int:
+        """Find existing tag by name in cache, or create a new one.
+
+        If the cache is empty it is loaded first. If creation fails (e.g. a unique
+        constraint because the item exists but was absent from the cache), the cache
+        is refreshed and the lookup retried before propagating the error.
+        """
+        if not self._cache_tags:
+            await self.get_tags()
+        for tag_id, tag in (self._cache_tags or {}).items():
+            if tag.name and tag.name.lower() == name.lower():
+                self.logging.debug("Resolved tag '%s' → id=%s", name, tag_id)
+                return int(tag_id)
+        try:
+            new_id = await self.do_create_tag(name)
+            self.logging.info("Created new tag '%s' → id=%d", name, new_id)
+            if self._cache_tags is not None:
+                self._cache_tags[str(new_id)] = TagDetails(
+                    engine=self._get_engine_name(), id=str(new_id), name=name
+                )
+            return new_id
+        except Exception:
+            await self.get_tags(force=True)
+            for tag_id, tag in (self._cache_tags or {}).items():
+                if tag.name and tag.name.lower() == name.lower():
+                    self.logging.debug(
+                        "Resolved tag '%s' after cache refresh → id=%s", name, tag_id
+                    )
+                    return int(tag_id)
+            raise
 
     ##########################################
     ########### RESPONSE PARSER ##############

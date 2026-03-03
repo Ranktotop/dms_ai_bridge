@@ -39,7 +39,7 @@ temp/
 /test_results/
 /logs/
 /input
-/job_files/
+/testdocs/
 
 #requirements
 *_dev.in

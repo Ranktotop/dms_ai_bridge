@@ -219,13 +219,17 @@ class ClientInterface(ABC):
             "params": params,
         }
 
-        # add exactly one body argument
+        # Build body kwargs.
+        # files + data together → httpx sends multipart/form-data with both file
+        # parts and field parts.  Any other combination is mutually exclusive.
         if content is not None:
             kwargs["content"] = content
-        elif data is not None:
-            kwargs["data"] = data
         elif files is not None:
             kwargs["files"] = files
+            if data is not None:
+                kwargs["data"] = data
+        elif data is not None:
+            kwargs["data"] = data
         elif json is not None:
             kwargs["json"] = json
 
