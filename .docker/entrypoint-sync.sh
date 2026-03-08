@@ -34,7 +34,7 @@ SYNC_CRON="${SYNC_CRON:-0 * * * *}"
 
 echo "[sync] Installing crontab schedule: $SYNC_CRON"
 cat > /tmp/sync-crontab <<EOF
-$SYNC_CRON python3 -u /app/services/dms_rag_sync/dms_rag_sync.py
+$SYNC_CRON /opt/venv/bin/python3 -u /app/services/dms_rag_sync/dms_rag_sync.py
 EOF
 
 #######################################
