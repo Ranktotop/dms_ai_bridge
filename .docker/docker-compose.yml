@@ -1,51 +1,86 @@
 services:
-  dms_ai_bridge:
-    build:
-      context: ..
-      dockerfile: .docker/Dockerfile
-    ports:
-      - "8000:8000"
-    env_file:
-      - ../.env
-    depends_on:
-      qdrant:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
-      interval: 30s
-      timeout: 10s
-      start_period: 15s
-      retries: 3
-
-  qdrant:
-    image: qdrant/qdrant:latest
-    ports:
-      - "6333:6333"
-    volumes:
-      - qdrant_data:/qdrant/storage
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:6333/healthz"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 5s
+    networks:
+      default:
+        aliases:
+          - redis
+    volumes:
+      - redis_data:/data
+
+  server:
+    image: ${DOCKERHUB_NS:-dmsaibridge}/dms-ai-bridge:latest
+    entrypoint: ["/app/.docker/entrypoint.sh"]
+    env_file:
+      - ../.env
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+    ports:
+      - ${API_PORT:-8000}:8000
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      default:
+        aliases:
+          - dmsaibridge_server
+
+  ingestion:
+    image: ${DOCKERHUB_NS:-dmsaibridge}/dms-ai-bridge:latest
+    entrypoint: ["/app/.docker/entrypoint-ingestion.sh"]
+    env_file:
+      - ../.env
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      DOC_INGESTION_WATCH: "true"
+    volumes:
+      - ${INGESTION_PATH:-/data/ingestion}:/data/ingestion
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      default:
+        aliases:
+          - dmsaibridge_ingestion
+
+  sync:
+    image: ${DOCKERHUB_NS:-dmsaibridge}/dms-ai-bridge:latest
+    entrypoint: ["/app/.docker/entrypoint-sync.sh"]
+    env_file:
+      - ../.env
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      SYNC_CRON: ${SYNC_CRON:-0 * * * *}
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      default:
+        aliases:
+          - dmsaibridge_sync
 
 volumes:
-  qdrant_data:
   redis_data:
+
+networks:
+  default:
