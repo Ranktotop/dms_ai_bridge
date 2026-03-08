@@ -57,6 +57,7 @@ services:
       PUID: ${PUID:-1000}
       PGID: ${PGID:-1000}
       DOC_INGESTION_WATCH: ${DOC_INGESTION_WATCH:-true}
+      DOC_INGESTION_PAPERLESS_PATH: /app/ingestion_paperless
       # cache
       CACHE_ENGINE: "redis"
       CACHE_REDIS_BASE_URL: "redis://dmsaibridge_redis:6379"
@@ -64,7 +65,7 @@ services:
       CACHE_REDIS_DB: 0
       CACHE_REDIS_DEFAULT_TTL_SECONDS: 86400
     volumes:
-      - ${INGESTION_PATH:-/data/ingestion}:/data/ingestion
+      - ${DOC_INGESTION_PAPERLESS_PATH}:/app/ingestion_paperless
     depends_on:
       redis:
         condition: service_healthy
