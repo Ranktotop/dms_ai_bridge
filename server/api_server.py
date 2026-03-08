@@ -1,5 +1,6 @@
 """FastAPI application entry point for dms_ai_bridge Phase III."""
 
+import logging as std_logging
 import os
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
@@ -30,6 +31,14 @@ from services.agent.AgentService import AgentService
 
 logging = setup_logging()
 app_version = os.getenv("APP_VERSION", "unknown")
+
+
+class _HealthEndpointFilter(std_logging.Filter):
+    def filter(self, record: std_logging.LogRecord) -> bool:
+        return "/health" not in record.getMessage()
+
+
+std_logging.getLogger("uvicorn.access").addFilter(_HealthEndpointFilter())
 
 
 @asynccontextmanager
