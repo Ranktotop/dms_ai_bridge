@@ -57,4 +57,4 @@ echo "[sync:diag] --- end diagnostics ---"
 ########### SUPERCRONIC START #########
 #######################################
 echo "[sync] Starting supercronic"
-exec supercronic /tmp/sync-crontab
+supercronic /tmp/sync-crontab
