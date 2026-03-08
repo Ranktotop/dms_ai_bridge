@@ -65,6 +65,13 @@ def _read_engine_tasks(dms_clients: list[DMSClientInterface]) -> list[_EngineTas
             )
             continue
 
+        if not os.path.isdir(path):
+            logging.error(
+                "Engine '%s': path '%s' does not exist or is not a directory. Skipping engine.",
+                engine, path,
+            )
+            continue
+
         template = os.getenv(
             "DOC_INGESTION_%s_TEMPLATE" % engine, global_template
         ).strip()
@@ -157,9 +164,10 @@ async def run() -> None:
     if not tasks:
         logging.error(
             "No engines configured for ingestion. "
-            "Set DOC_INGESTION_{ENGINE}_PATH for at least one engine."
+            "Set DOC_INGESTION_{ENGINE}_PATH for at least one engine "
+            "and ensure the directory exists."
         )
-        sys.exit(1)
+        sys.exit(0)
 
     for task in tasks:
         await task.dms_client.fill_cache()

@@ -68,7 +68,7 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-    restart: unless-stopped
+    restart: on-failure
     networks:
       default:
         aliases:
