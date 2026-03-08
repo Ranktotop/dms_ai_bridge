@@ -376,8 +376,18 @@ dms_ai_bridge/
 │   ├── dms_rag_sync/
 │   │   ├── SyncService.py               ← DMS → embed → RAG orchestration
 │   │   └── dms_rag_sync.py              ← entry point (python -m services.dms_rag_sync)
+│   ├── agent/
+│   │   ├── AgentService.py              ← ReAct loop orchestrator
+│   │   └── tools/
+│   │       ├── AgentToolInterface.py    ← abstract tool base ABC
+│   │       ├── AgentToolManager.py      ← tool registry + descriptions builder
+│   │       ├── search_documents/        ← AgentToolSearchDocuments
+│   │       ├── list_filter_options/     ← AgentToolListFilterOptions
+│   │       └── get_document_details/    ← AgentToolGetDocumentDetails
 │   └── rag_search/
-│       └── SearchService.py             ← embed → scroll → list[SearchResult] (no FastAPI)
+│       ├── SearchService.py             ← embed → scroll → list[SearchResult] (no FastAPI)
+│       └── helper/
+│           └── IdentityHelper.py        ← resolves frontend user_id → owner_id map
 ├── config/
 │   └── user_mapping.yml                 ← frontend/user_id → DMS owner_id mapping
 └── server/
@@ -564,6 +574,39 @@ changing search/ranking logic in `SearchService`.
 
 ---
 
+### `agent-agent` — ReAct Agent Subsystem
+**Model:** `claude-sonnet-4-6`
+
+**Owns:**
+- `services/agent/AgentService.py` — ReAct loop orchestrator
+- `services/agent/tools/AgentToolInterface.py` — abstract tool base ABC
+- `services/agent/tools/AgentToolManager.py` — tool registry + descriptions builder
+- `services/agent/tools/search_documents/AgentToolSearchDocuments.py`
+- `services/agent/tools/list_filter_options/AgentToolListFilterOptions.py`
+- `services/agent/tools/get_document_details/AgentToolGetDocumentDetails.py`
+
+**Invoke when:**
+modifying the ReAct loop, adding or changing a tool, changing the step_callback
+mechanism, updating the system prompt, or adjusting how tool errors are handled.
+
+**Key rules:**
+- No FastAPI imports in `services/agent/` — keep the subsystem framework-agnostic
+- System prompt only via `_get_system_prompt()` getter — never as a module-level constant
+- `step_callback` is optional — always guard with `if step_callback:` before calling
+- Tool errors: log the exception, return a user-friendly error string from `do_execute()` —
+  never re-raise out of `do_execute()`
+- New tool: create `services/agent/tools/{tool_name}/AgentTool{Name}.py`, inherit
+  `AgentToolInterface`, implement `do_execute()` and `get_step_hint()`, register in
+  `AgentToolManager`
+
+**Key contracts:**
+- `AgentService.do_run(query, chat_history, max_iterations, step_callback, identity_helper, client_settings) -> AgentResponse`
+  — consumed by api-agent's `ChatRouter`
+- Tools read `SearchService.do_search()` and `SearchService.do_fetch_by_doc_id()` —
+  coordinate signature changes with service-agent
+
+---
+
 ### `ingestion-agent` — Document Ingestion Pipeline
 **Model:** `claude-sonnet-4-6`
 
@@ -682,8 +725,7 @@ pdf backend), or adding new conversion capabilities to `OCRClientInterface`.
 
 **Invoke when:**
 creating the FastAPI app, adding routes, wiring `SearchService` into `QueryRouter`,
-implementing `UserMappingService`, integrating LangChain for Phase IV, or implementing
-auth middleware.
+implementing `UserMappingService`, or implementing auth middleware.
 
 **Key rules:**
 - All route handlers: `async def`
@@ -696,7 +738,7 @@ auth middleware.
 - `QueryRouter` is a thin adapter: resolve user_id → owner_id → call `SearchService.do_search()` →
   map `list[SearchResult]` to `SearchResponse` — no embed, scroll, or LLM logic in the router
 - Every subdirectory under `server/` needs `__init__.py` for uvicorn module resolution
-- Phase IV is complete — custom ReAct agent in `services/rag_search/agent/ReActAgent.py`
+- Phase IV is complete — `ChatRouter` is a thin adapter over `AgentService` (owned by agent-agent)
 
 **API contracts:**
 ```
@@ -841,6 +883,7 @@ SYSTEM_PROMPT = "You are a ..."
 | Redis, `CacheClientInterface`, filter option cache, cache invalidation | `cache-agent` |
 | Ollama, `LLMClientInterface`, embedding, chat, new LLM provider | `embed-llm-agent` |
 | Sync pipeline, `SyncService`, `SearchService`, orphan cleanup | `service-agent` |
+| ReAct loop, `AgentService`, agent tools, `step_callback`, system prompt | `agent-agent` |
 | File ingestion, `Document`, `DocumentConverter`, `IngestionService` | `ingestion-agent` |
 | `OCRClientInterface`, `OCRClientDocling`, `OCR_ENGINE`, Docling backend | `ocr-agent` |
 | FastAPI routes, `QueryRouter`, webhook, auth, Phase III/IV server | `api-agent` |

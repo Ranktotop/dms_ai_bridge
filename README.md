@@ -190,15 +190,26 @@ dms_ai_bridge/
 │   ├── dms_rag_sync/
 │   │   ├── SyncService.py               # DMS → embed → RAG orchestration
 │   │   └── dms_rag_sync.py              # Entry point (python -m services.dms_rag_sync)
+│   ├── agent/
+│   │   ├── AgentService.py              # ReAct loop orchestrator
+│   │   └── tools/
+│   │       ├── AgentToolInterface.py    # Abstract tool base ABC
+│   │       ├── AgentToolManager.py      # Tool registry + descriptions builder
+│   │       ├── search_documents/        # AgentToolSearchDocuments
+│   │       ├── list_filter_options/     # AgentToolListFilterOptions
+│   │       └── get_document_details/    # AgentToolGetDocumentDetails
 │   └── rag_search/
-│       └── SearchService.py             # embed → search → list[SearchResult]
+│       ├── SearchService.py             # embed → search → list[SearchResult]
+│       └── helper/
+│           └── IdentityHelper.py        # Resolves frontend user_id → owner_id map
 ├── config/
 │   └── user_mapping.yml                 # frontend/user_id → DMS owner_id mapping
 └── server/                              # Phase III/IV
     ├── api_server.py                    # FastAPI entry point with lifespan
     ├── routers/
     │   ├── WebhookRouter.py             # POST /webhook/{engine}/document
-    │   └── QueryRouter.py               # POST /query/{frontend}
+    │   ├── QueryRouter.py               # POST /query/{frontend}
+    │   └── ChatRouter.py                # POST /chat/{frontend} + /stream (ReAct agent)
     ├── dependencies/
     │   ├── auth.py                      # X-API-Key verification
     │   └── services.py                  # FastAPI Depends helpers
@@ -415,9 +426,11 @@ ReAct agent — streams the answer word-by-word as Server-Sent Events.
 
 **SSE format**
 ```
-data: {"chunk": "In "}
-data: {"chunk": "2024 "}
+data: {"type": "step", "chunk": "🔍 Suche nach Dokumenten..."}
+data: {"type": "answer", "chunk": "In "}
+data: {"type": "answer", "chunk": "2024 "}
 ...
+data: {"type": "step", "chunk": "✅ Fertig"}
 data: [DONE]
 ```
 
@@ -441,12 +454,12 @@ A pipeline plugin that connects OpenWebUI to dms_ai_bridge via the `/chat/openwe
    - `API_KEY` — matches `APP_API_KEY` in your `.env`
    - `USER_ID` — OpenWebUI user ID mapped in `config/user_mapping.yml`
 
-### AnythingLLM (`integrations/anythingllm/dms_bridge_skill.js`)
+### AnythingLLM (`integrations/anythingllm/dms-bridge-skill/`)
 
 An agent skill that gives AnythingLLM document search capabilities via `/chat/anythingllm`
 (falls back to `/query/anythingllm` if the chat endpoint is unavailable).
 
-1. Copy `integrations/anythingllm/dms_bridge_skill.js` to the AnythingLLM skills directory.
+1. Copy the `integrations/anythingllm/dms-bridge-skill/` folder to the AnythingLLM custom skills directory (contains `handler.js`, `plugin.json`, `package.json`).
 2. Enable the "DMS Document Search" skill in Agent Settings and configure:
    - `API_URL` — dms_ai_bridge server URL (default: `http://dms-bridge:8000`)
    - `API_KEY` — matches `APP_API_KEY` in your `.env`

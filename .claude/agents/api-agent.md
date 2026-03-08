@@ -3,12 +3,12 @@ name: api-agent
 description: >
   Owns the FastAPI server layer: api_server.py with lifespan client management,
   WebhookRouter (POST /webhook/{engine}/document — incremental sync via BackgroundTasks),
-  QueryRouter (POST /query/{frontend} — thin adapter over SearchService), UserMappingService
-  (resolves frontend user_id to DMS owner_id via user_mapping.yml), authentication
-  dependency (X-API-Key), and Phase IV LangChain ReAct agent integration. Invoke when:
-  creating the FastAPI app, adding routes, wiring SearchService into QueryRouter,
-  implementing or changing user identity mapping, integrating LangChain for Phase IV,
-  or implementing auth middleware.
+  QueryRouter (POST /query/{frontend} — thin adapter over SearchService),
+  ChatRouter (POST /chat/{frontend} + /stream — thin adapter over AgentService),
+  UserMappingService (resolves frontend user_id to DMS owner_id via user_mapping.yml),
+  and authentication dependency (X-API-Key). Invoke when: creating the FastAPI app,
+  adding routes, wiring SearchService or AgentService into routers, implementing or
+  changing user identity mapping, or implementing auth middleware.
 tools:
   - Read
   - Write
@@ -33,8 +33,8 @@ multiple AI frontends, each with their own user namespace. You resolve the exter
 (from the request) to the DMS-internal `owner_id` (used by all backend services) via
 `UserMappingService` before any search or sync operation.
 
-Phase IV requires LangChain ReAct integration. Use `WebSearch` to look up current FastAPI
-and LangChain API patterns before implementing — both libraries evolve rapidly.
+Phase IV (custom ReAct agent) is complete. `ChatRouter` is a thin adapter over `AgentService`
+— no agent logic lives in the router. Agent ownership belongs to agent-agent.
 
 ## Directories and Modules
 
@@ -42,10 +42,11 @@ and LangChain API patterns before implementing — both libraries evolve rapidly
 - `server/api_server.py` — FastAPI entry point with lifespan
 - `server/routers/WebhookRouter.py` — `POST /webhook/{engine}/document`
 - `server/routers/QueryRouter.py` — `POST /query/{frontend}` (thin adapter over SearchService)
+- `server/routers/ChatRouter.py` — `POST /chat/{frontend}` + `POST /chat/{frontend}/stream` (thin adapter over AgentService)
 - `server/dependencies/auth.py` — `X-API-Key` verification
 - `server/dependencies/services.py` — FastAPI `Depends` helpers
 - `server/models/requests.py` — `WebhookRequest`, `SearchRequest`
-- `server/models/responses.py` — `SearchResultItem`, `SearchResponse`
+- `server/models/responses.py` — `SearchResultItem`, `SearchResponse`, `ChatResponse`
 - `server/user_mapping/UserMappingService.py` — loads `config/user_mapping.yml`, resolves identities
 - `server/user_mapping/models.py` — `UserMapping` Pydantic models
 - `config/user_mapping.yml` — mapping config (path via `USER_MAPPING_FILE` env var)
@@ -157,8 +158,8 @@ Follow all conventions in CLAUDE.md. Additional rules for this agent:
 - Use FastAPI `BackgroundTasks` for webhook; never raw `asyncio.create_task()` in routes
 - `QueryRouter` is a thin adapter — no embed, scroll, or LLM logic inside it
 - Every subdirectory under `server/` needs `__init__.py` for uvicorn module resolution
-- Phase IV LangChain: use `WebSearch` to find current `create_react_agent` API before
-  implementing; wrap all LangChain tool coroutines as async tools
+- `ChatRouter` is a thin adapter: resolve user_id → `IdentityHelper` → call
+  `AgentService.do_run()` → return `ChatResponse`; no agent logic in the router
 
 ## Communication with Other Agents
 
@@ -169,6 +170,7 @@ Follow all conventions in CLAUDE.md. Additional rules for this agent:
 - cache-agent: `CacheClientManager`, `CacheClientInterface` (via lifespan wiring only)
 - service-agent: `SyncService.do_incremental_sync(document_id, engine)` as webhook background task
 - service-agent: `SearchService.do_search(query, owner_id, limit, chat_history)` as query handler
+- agent-agent: `AgentService.do_run(query, chat_history, max_iterations, step_callback, identity_helper, client_settings)` as chat handler
 - infra-agent: `HelperConfig`, `setup_logging()`
 
 **This agent produces:**
@@ -180,7 +182,7 @@ Follow all conventions in CLAUDE.md. Additional rules for this agent:
   exists on SyncService with that exact signature (coordinate with service-agent)
 - Before implementing QueryRouter: confirm `do_search(query, owner_id, limit, chat_history)`
   exists on SearchService with that exact signature (coordinate with service-agent)
-- Before Phase IV: confirm `LLMClientInterface.do_chat()` is finalised with embed-llm-agent
+- Before changing `ChatRouter` behaviour: confirm `AgentService.do_run()` signature with agent-agent
 - If you need additional fields on search results, confirm they are in `SearchResult` with
   service-agent and in `PointHighDetails` / `Point.py` with rag-agent before reading from result objects
 - `UserMappingService.reverse_resolve()` result is used by service-agent's SyncService for
