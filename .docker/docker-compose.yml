@@ -1,29 +1,36 @@
 services:
 
   redis:
-    image: redis:7-alpine
+    image: redis:alpine
+    command: redis-server --requirepass ${CACHE_REDIS_PASSWORD}
+    volumes:
+      - redis:/data
     restart: unless-stopped
+    networks:
+      default:
+        aliases:
+          - dmsaibridge_redis
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "sh", "-c", "redis-cli -a ${CACHE_REDIS_PASSWORD} ping || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 5s
-    networks:
-      default:
-        aliases:
-          - redis
-    volumes:
-      - redis_data:/data
 
   server:
-    image: ${DOCKERHUB_NS:-dmsaibridge}/dms-ai-bridge:latest
+    image: ranktotop/dmsaibridge:latest
     entrypoint: ["/app/.docker/entrypoint.sh"]
-    env_file:
-      - ../.env
+    env_file: [stack.env]
     environment:
+      # general
       PUID: ${PUID:-1000}
       PGID: ${PGID:-1000}
+      # cache
+      CACHE_ENGINE: "redis"
+      CACHE_REDIS_BASE_URL: "redis://dmsaibridge_redis:6379"
+      CACHE_REDIS_PASSWORD: ${CACHE_REDIS_PASSWORD}
+      CACHE_REDIS_DB: 0
+      CACHE_REDIS_DEFAULT_TTL_SECONDS: 86400
     ports:
       - ${API_PORT:-8000}:8000
     depends_on:
@@ -42,14 +49,20 @@ services:
           - dmsaibridge_server
 
   ingestion:
-    image: ${DOCKERHUB_NS:-dmsaibridge}/dms-ai-bridge:latest
+    image: ranktotop/dmsaibridge:latest
     entrypoint: ["/app/.docker/entrypoint-ingestion.sh"]
-    env_file:
-      - ../.env
+    env_file: [stack.env]
     environment:
+      # general
       PUID: ${PUID:-1000}
       PGID: ${PGID:-1000}
-      DOC_INGESTION_WATCH: "true"
+      DOC_INGESTION_WATCH: ${DOC_INGESTION_WATCH:-true}
+      # cache
+      CACHE_ENGINE: "redis"
+      CACHE_REDIS_BASE_URL: "redis://dmsaibridge_redis:6379"
+      CACHE_REDIS_PASSWORD: ${CACHE_REDIS_PASSWORD}
+      CACHE_REDIS_DB: 0
+      CACHE_REDIS_DEFAULT_TTL_SECONDS: 86400
     volumes:
       - ${INGESTION_PATH:-/data/ingestion}:/data/ingestion
     depends_on:
@@ -62,14 +75,21 @@ services:
           - dmsaibridge_ingestion
 
   sync:
-    image: ${DOCKERHUB_NS:-dmsaibridge}/dms-ai-bridge:latest
+    image: ranktotop/dmsaibridge:latest
     entrypoint: ["/app/.docker/entrypoint-sync.sh"]
-    env_file:
-      - ../.env
+    env_file: [stack.env]
     environment:
+      # general
       PUID: ${PUID:-1000}
       PGID: ${PGID:-1000}
+      # cron
       SYNC_CRON: ${SYNC_CRON:-0 * * * *}
+      # cache
+      CACHE_ENGINE: "redis"
+      CACHE_REDIS_BASE_URL: "redis://dmsaibridge_redis:6379"
+      CACHE_REDIS_PASSWORD: ${CACHE_REDIS_PASSWORD}
+      CACHE_REDIS_DB: 0
+      CACHE_REDIS_DEFAULT_TTL_SECONDS: 86400
     depends_on:
       redis:
         condition: service_healthy
@@ -80,7 +100,7 @@ services:
           - dmsaibridge_sync
 
 volumes:
-  redis_data:
+  redis:
 
 networks:
   default:
