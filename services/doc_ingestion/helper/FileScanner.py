@@ -12,8 +12,8 @@ except ImportError:
 
 SUPPORTED_EXTENSIONS = frozenset({".pdf", ".png", ".jpg", ".jpeg", ".txt", ".md"})
 
-_FILE_STABLE_INTERVAL = 0.5   # seconds between size checks
-_FILE_STABLE_RETRIES  = 6     # max checks before giving up (6 × 0.5 s = 3 s total)
+_FILE_STABLE_INTERVAL = 5.0    # seconds between size checks
+_FILE_STABLE_RETRIES  = 12    # max checks before giving up (12 × 5 s = 60 s total)
 
 
 class FileScanner:
@@ -66,19 +66,25 @@ class FileScanner:
             await callback(file_path)
 
     async def _is_file_stable(self, file_path: str) -> bool:
-        """Poll the file size until it stops changing.
+        """Observe the file for the full stability window before processing.
 
-        Returns True if the file is stable and ready for processing.
-        Returns False if the file disappeared before it became stable.
+        Polls the file size every ``_FILE_STABLE_INTERVAL`` seconds for
+        ``_FILE_STABLE_RETRIES`` iterations.  All readings must show the same
+        size; if the size changes at any point the stable-reading counter
+        resets.  Returns True only when the file has been unchanged for the
+        entire observation window.  Returns False if the file disappears.
         """
+        stable_readings = 0
         previous_size = -1
         for _ in range(_FILE_STABLE_RETRIES):
+            await asyncio.sleep(_FILE_STABLE_INTERVAL)
             try:
                 current_size = os.path.getsize(file_path)
             except OSError:
                 return False
             if current_size == previous_size:
-                return True
-            previous_size = current_size
-            await asyncio.sleep(_FILE_STABLE_INTERVAL)
-        return previous_size >= 0
+                stable_readings += 1
+            else:
+                stable_readings = 0
+                previous_size = current_size
+        return stable_readings == _FILE_STABLE_RETRIES
