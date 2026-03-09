@@ -308,7 +308,7 @@ class Document():
         )     
 
         # make sure each field of DocMetadata is filled (skip list fields — empty list is valid)
-        skip_fields = {"tags"}
+        skip_fields = {"tags", "quarter"}
         for field_name in content_meta.__dataclass_fields__.keys():
             if field_name in skip_fields:
                 continue
