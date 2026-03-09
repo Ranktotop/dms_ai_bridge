@@ -255,12 +255,16 @@ class Document():
         self.logging.info("Merged Formatted pages from '%s'", self._source_filename, color="green")
         self.logging.debug(self._final_content, color="blue")
         
-    async def load_metadata(self, additional_doc_types: list[str] | None = None) -> None:
+    async def load_metadata(self, 
+        additional_doc_types: list[str] | None = None, 
+        additional_correspondents: list[str] | None = None, 
+        additional_tags: list[str] | None = None) -> None:
         """Phase 3: Fetch metadata from path and enrich them by using LLM on final_content
 
         Args:
             additional_doc_types: Optional list of additional document type strings to include as hints in the prompt for LLM metadata extraction.
-
+            additional_correspondents: Optional list of additional correspondent strings to include as hints in the prompt for LLM metadata extraction.
+            additional_tags: Optional list of additional tag name strings to include as hints in the prompt for LLM metadata extraction.
         Raises:
             RuntimeError: If content is not available or an LLM call fails.
         """
@@ -273,9 +277,25 @@ class Document():
             raise RuntimeError("Document: cannot extract metadata, no path metadata available. Did you ran boot()?")
             
         # fill up using llm
-        llm_meta = await self._call_chat_llm_meta(additional_doc_types=additional_doc_types)
+        llm_meta = await self._call_chat_llm_meta(
+            additional_doc_types=additional_doc_types, 
+            additional_correspondents=additional_correspondents,
+            additional_tags=additional_tags)
+        # currently this is empty as we only extract tags from the content in the next phase, 
+        # but we prepare for the case that the LLM could already return 
+        # some tags in the metadata extraction step in the future
+        llm_meta_tags = llm_meta.tags if llm_meta.tags else [] 
+        #for cleaner code we separate the tags here
+        path_tags = self._metadata_path.tags if self._metadata_path.tags else []
         
-        # merge path meta with llm meta
+        # lets compare the tags (case insensitive) for avoid duplicates
+        for tag in path_tags:
+            if tag.lower() not in [t.lower() for t in llm_meta_tags]:
+                llm_meta_tags.append(tag)
+        #strip out empty lines
+        llm_meta_tags = [t.strip() for t in llm_meta_tags if t.strip()]
+        
+        # merge path meta with llm meta (tags are processed later)
         content_meta = DocMetadata(
             correspondent=self._metadata_path.correspondent or llm_meta.correspondent,
             document_type=self._metadata_path.document_type or llm_meta.document_type,
@@ -283,6 +303,7 @@ class Document():
             month=self._metadata_path.month or llm_meta.month,
             day=self._metadata_path.day or llm_meta.day,
             title=self._metadata_path.title or llm_meta.title,
+            tags=llm_meta_tags,
             filename=self._helper_file.get_basename(self._source_file, True)
         )     
 
@@ -312,8 +333,21 @@ class Document():
         # check if content was already extracted
         if not self._final_content:
             raise RuntimeError("Document: cannot extract tags, no final content available")
+        
+        # use current tags if metadata extraction already found some
+        current_tags = self._metadata_final.tags if self._metadata_final and self._metadata_final.tags else []
+        # lets compare given additional tags with current tags (case insensitive) for avoid duplicates
+        for tag in additional_tags or []:
+            if tag.lower() not in [t.lower() for t in current_tags]:
+                current_tags.append(tag)
+        # strip out empty lines
+        current_tags = [t.strip() for t in current_tags if t.strip()]
+        # if empty, set to None, because its the default
+        if not current_tags:
+            current_tags = None
+
         # fetch tags via LLM
-        tags = await self._call_chat_llm_tags(additional_tags=additional_tags)
+        tags = await self._call_chat_llm_tags(additional_tags=current_tags)
         # prepend tags collected from the elastic zone of the path template
         path_tags = self._metadata_path.tags if self._metadata_path else []
         combined = list(path_tags)
@@ -717,15 +751,20 @@ class Document():
             i += 1
         return "\n\n".join(result_parts).strip()   
     
-    async def _call_chat_llm_meta(self, additional_doc_types: list[str] | None = None) -> DocMetadata:
+    async def _call_chat_llm_meta(self, 
+        additional_doc_types: list[str] | None = None, 
+        additional_correspondents: list[str] | None = None,
+        additional_tags: list[str] | None = None) -> DocMetadata:
         """Extract metadata from the formatted document content via the chat LLM.
 
         Sends the first 3 000 characters of the formatted content together with
         an extraction prompt and an optional hint containing existing DMS
-        document-type names.  Parses the JSON response into a ``DocMetadata``.
+        document-type names, correspondents, and tags.  Parses the JSON response into a ``DocMetadata``.
 
         Args:
             additional_doc_types: Optional list of additional document type strings to include as hints in the prompt.
+            additional_correspondents: Optional list of additional correspondent strings to include as hints in the prompt.
+            additional_tags: Optional list of additional tag name strings to include as hints in the prompt.
 
         Returns:
             ``DocMetadata`` with fields populated from the LLM response.
@@ -735,7 +774,13 @@ class Document():
                 parsed as JSON.
         """
         #read the existing data from dms cache
-        prompt = self._get_prompt_extraction() + (self._get_prompt_cache(additional_doc_types=additional_doc_types) or "") + "\nDocument text:\n" + self._final_content[:3000]
+        cache_prompt = self._get_prompt_cache(
+            additional_doc_types=additional_doc_types, 
+            additional_correspondents=additional_correspondents, 
+            additional_tags=additional_tags)
+        
+        prompt = self._get_prompt_extraction() + (cache_prompt or "") + "\n\nDocument text:\n" + self._final_content
+        prompt = prompt[:self._llm_client.get_chat_model_max_chars()]  # limit the prompt to the first x chars of the content, as the most relevant info is usually at the beginning of the document and to avoid hitting token limits
         messages = [{"role": "user", "content": prompt}]
         try:
             # run the prompt
@@ -771,7 +816,8 @@ class Document():
         Raises:
             RuntimeError: If the LLM call fails or the response is not a valid JSON array or empty.
         """
-        prompt = self._get_prompt_tags(additional_tags=additional_tags) + self._final_content[:3000]
+        prompt = self._get_prompt_tags(additional_tags=additional_tags) + self._final_content
+        prompt = prompt[:self._llm_client.get_chat_model_max_chars()]  # limit the prompt to the first x chars of the content
         messages = [{"role": "user", "content": prompt}]
         try:
             raw = await self._llm_client.do_chat(messages)
@@ -809,6 +855,13 @@ class Document():
             })
             if names:
                 result["tags"] = names
+        if self._dms_client._cache_correspondents:
+            names = sorted({
+                c.name for c in self._dms_client._cache_correspondents.values()
+                if c.name
+            })
+            if names:
+                result["correspondents"] = names
         return result
     
     ##########################################
@@ -820,10 +873,11 @@ class Document():
         return ("""
             You are a document metadata extractor. Analyse the following document text and extract metadata.
 
-            LANGUAGE: All extracted text values must be in %s.
+            LANGUAGE: All extracted text values must be in %s (except for the "correspondent" field).
 
             Return a JSON object with these fields (use null if unknown):
             {
+                "correspondent": "name of the company the document is addressed to (e.g. Saarstahl GmbH, Müller Versicherung AG). If no company name is found, use name of the person (without title) secondary. If person is also not found, set to null",
                 "document_type": "type of document (e.g. Rechnung, Vertrag, Brief, Quittung)",
                 "title": "short document title",
                 "year": "4-digit year of document creation date, if detectable. Aka YYYY",
@@ -834,13 +888,20 @@ class Document():
             Return ONLY the JSON object, no other text.
             """ % self._language).strip()
     
-    def _get_prompt_cache(self, additional_doc_types: list[str] | None = None) -> str|None:
-        """Build an optional prompt segment listing existing DMS document types.
+    def _get_prompt_cache(self, 
+        additional_doc_types: list[str] | None = None, 
+        additional_correspondents: list[str] | None = None,
+        additional_tags: list[str] | None = None) -> str|None:
+        """
+        Build an optional prompt segment listing existing DMS document types.
+        NOTE: additional_tags is currently not used in the prompt, but we prepare for the case that the LLM could already return some tags in the metadata extraction step in the future, so we include it here for completeness and future-proofing.
         
         Args:
             additional_doc_types: Optional list of additional document type strings to include as hints in the prompt.
+            additional_correspondents: Optional list of additional correspondent strings to include as hints in the prompt.
+            additional_tags: Optional list of additional tag name strings to include as hints in the prompt.
 
-        Returns None if the DMS cache is empty or contains no document types.
+        Returns None if the DMS cache is empty or contains no document types and correspondents.
         """
         cache = self._get_dms_cache()
         #first read from cache
@@ -850,10 +911,19 @@ class Document():
             for doc_type in additional_doc_types:
                 if doc_type not in cache_doc_types:
                     cache_doc_types.append(doc_type)
-        #if there are no doc types to show, return None to skip the prompt segment            
-        if not cache_doc_types:
+        cache_correspondents = cache.get("correspondents", []) if cache else []
+        if additional_correspondents:
+            #add each additional correspondent if not already in the list, to avoid duplicates in the prompt
+            for correspondent in additional_correspondents:
+                if correspondent not in cache_correspondents:
+                    cache_correspondents.append(correspondent)
+
+        #if there are no doc types or correspondents to show, return None to skip the prompt segment            
+        if not cache_doc_types and not cache_correspondents:
             return None
-        cache_line = "Document types: %s" % ", ".join(cache_doc_types)
+        cache_line_doctypes = "Document types:\n%s" % ", ".join(cache_doc_types)
+        cache_line_correspondents = "Correspondents:\n%s" % ", ".join(cache_correspondents)
+        cache_line = "\n\n".join([line for line in [cache_line_doctypes, cache_line_correspondents] if line])
         return ("""
             EXISTING VALUES IN THE SYSTEM (use these exact names if they match):
             %s

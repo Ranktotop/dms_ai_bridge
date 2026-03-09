@@ -223,21 +223,45 @@ class IngestionService:
         # Phase 3: Load the meta
         meta_docs: list[Document] = []
         new_document_types = []
+        new_document_types_lc = []
+        new_correspondents = []
+        new_correspondents_lc = []
+        new_tags = []
+        new_tags_lc = []
+
         for doc in formatted_docs:
             try:
-                await doc.load_metadata(additional_doc_types=new_document_types)
+                await doc.load_metadata(
+                    additional_doc_types=new_document_types,
+                    additional_correspondents=new_correspondents,
+                    additional_tags=new_tags)
                 meta_docs.append(doc)
-                # Collect the document types for the batch so they can be included as hints in the prompt for the next documents in the batch
-                chosen_doc_type = doc.get_metadata().document_type
-                if chosen_doc_type and chosen_doc_type not in new_document_types:
+
+                # Collect the document types, correspondents and tags for the batch so they can be included as hints in the prompt for the next documents in the batch
+                meta = doc.get_metadata()
+                #doc types
+                chosen_doc_type = meta.document_type
+                if chosen_doc_type and chosen_doc_type.lower() not in new_document_types_lc:
                     new_document_types.append(chosen_doc_type)
+                    new_document_types_lc.append(chosen_doc_type.lower())
+                # correspondent
+                chosen_correspondent = meta.correspondent
+                if chosen_correspondent and chosen_correspondent.lower() not in new_correspondents_lc:
+                    new_correspondents.append(chosen_correspondent)
+                    new_correspondents_lc.append(chosen_correspondent.lower())
+                # tags
+                chosen_tags = meta.tags if meta.tags else []
+                for tag in chosen_tags:
+                    if tag.lower() not in new_tags_lc:
+                        new_tags.append(tag)
+                        new_tags_lc.append(tag.lower())
+
             except Exception as e:
                 self.logging.error("Failed to load metadata for document '%s': %s", doc.get_source_file(True), e)
                 doc.cleanup()
 
         # Phase 4: Collect the tags
         tagged_docs: list[Document] = []
-        new_tags = []
         for doc in meta_docs:
             try:
                 await doc.load_tags(additional_tags=new_tags)
@@ -245,8 +269,9 @@ class IngestionService:
                 #add the new tags to the list for the next documents in the batch so they are included as hints in the prompt
                 chosen_tags = doc.get_tags()
                 for tag in chosen_tags:
-                    if tag not in new_tags:
+                    if tag.lower() not in new_tags_lc:
                         new_tags.append(tag)
+                        new_tags_lc.append(tag.lower())
             except Exception as e:
                 self.logging.error("Failed to load tags for document '%s': %s", doc.get_source_file(True), e)
                 doc.cleanup()
