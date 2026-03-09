@@ -28,5 +28,8 @@ redis>=5.0.0
 pymupdf>=1.24.0
 watchfiles>=0.21.0
 
+# Locale-aware date/month name parsing (used by PathTemplateParser)
+babel>=2.14.0
+
 # Task queue (Phase V)
 # celery>=5.4.0

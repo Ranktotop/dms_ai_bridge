@@ -19,6 +19,7 @@ class DocMetadata:
     year: str | None = None
     month: str | None = None
     day: str | None = None
+    quarter: str | None = None
     title: str | None = None
     filename: str | None = None
     tags: list[str] = field(default_factory=list)

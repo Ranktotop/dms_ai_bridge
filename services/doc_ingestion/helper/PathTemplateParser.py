@@ -17,7 +17,7 @@ class TemplateSegment:
     is_static: bool
     is_placeholder: bool
     is_wildcard: bool
-    validator: Callable[[str], bool] | None = None
+    validator: Callable[[str], str | None] | None = None
 
 
 class PathTemplateParser:
@@ -111,12 +111,13 @@ class PathTemplateParser:
     ############## GETTER ####################
     ##########################################
 
-    def _get_supported_fields(self) -> dict[str, Callable[[str], bool]]:
+    def _get_supported_fields(self) -> dict[str, Callable[[str], str | None] | None]:
         """Return supported field names mapped to their validator callbacks."""
         return {
             "correspondent": self._validate_non_empty,
             "document_type": self._validate_non_empty,
             "year":          self._validate_year,
+            "quarter":       self._validate_quarter,
             "month":         self._validate_month,
             "day":           self._validate_day,
             "title":         self._validate_non_empty,
@@ -260,11 +261,15 @@ class PathTemplateParser:
                 continue
 
             if template.is_placeholder:
-                if template.validator and not template.validator(segment):
-                    raise DocumentPathValidationError(
-                        f"Segment '{segment}' at position {len(path_segments)-1 - i} failed validation for field '{template.variable_name}' in template '{self._raw_path_template}' for path '{path}/FILENAME'"
-                    )
-                setattr(meta, template.variable_name, segment)
+                if template.validator:
+                    normalized = template.validator(segment)
+                    if normalized is None:
+                        raise DocumentPathValidationError(
+                            f"Segment '{segment}' at position {len(path_segments)-1 - i} failed validation for field '{template.variable_name}' in template '{self._raw_path_template}' for path '{path}/FILENAME'"
+                        )
+                    setattr(meta, template.variable_name, normalized)
+                else:
+                    setattr(meta, template.variable_name, segment)
 
         # collect the unprocessed segments as tags in meta
         if max_index < len(path_segments):
@@ -382,18 +387,99 @@ class PathTemplateParser:
     ############# VALIDATORS #################
     ##########################################
 
-    def _validate_year(self, value: str) -> bool:
-        """Return True if value is a 4-digit year string (e.g. '2023')."""
-        return bool(re.match(r"^\d{4}$", value))
+    def _validate_year(self, value: str) -> str | None:
+        """Return value unchanged if it is a 4-digit year string (e.g. '2023'), else None."""
+        return value if re.match(r"^\d{4}$", value) else None
 
-    def _validate_month(self, value: str) -> bool:
-        """Return True if value is a 1-or-2-digit month string (e.g. '01', '12')."""
-        return bool(re.match(r"^\d{1,2}$", value))
+    def _validate_month(self, value: str) -> str | None:
+        """Return a zero-padded 2-digit month string (e.g. '01', '12'), or None if invalid.
 
-    def _validate_day(self, value: str) -> bool:
-        """Return True if value is a 1-or-2-digit day string (e.g. '1', '31')."""
-        return bool(re.match(r"^\d{1,2}$", value))
+        Accepted formats:
+            - 1-or-2-digit number in range 1-12 (e.g. '1', '01', '12')
+            - M-prefixed number (e.g. 'M1', 'M01', 'M12', case-insensitive)
+            - English full name or 3-letter abbreviation (e.g. 'January', 'Jan', case-insensitive)
+            - German full name or abbreviation (e.g. 'Januar', 'Mär', case-insensitive)
+        """
+        # plain numeric
+        if re.match(r"^\d{1,2}$", value):
+            n = int(value)
+            return "%02d" % n if 1 <= n <= 12 else None
+        # M-prefixed
+        m = re.match(r"^M(\d{1,2})$", value, re.IGNORECASE)
+        if m:
+            n = int(m.group(1))
+            return "%02d" % n if 1 <= n <= 12 else None
+        # name-based lookup
+        return self._get_month_name_map().get(value.lower())
 
-    def _validate_non_empty(self, value: str) -> bool:
-        """Return True if value is a non-empty, non-whitespace string."""
-        return bool(value.strip())
+    def _validate_day(self, value: str) -> str | None:
+        """Return a zero-padded 2-digit day string (e.g. '01', '31') if value is a valid day (1-31), else None."""
+        if re.match(r"^\d{1,2}$", value):
+            n = int(value)
+            return "%02d" % n if 1 <= n <= 31 else None
+        return None
+
+    def _validate_non_empty(self, value: str) -> str | None:
+        """Return the stripped value if non-empty and non-whitespace, else None."""
+        stripped = value.strip()
+        return stripped if stripped else None
+
+    def _validate_quarter(self, value: str) -> str | None:
+        """Return a digit string '1'–'4' if value is a valid quarter, else None.
+
+        Accepted formats:
+            - single digit 1-4 (e.g. '1', '4')
+            - Q-prefixed digit 1-4 (e.g. 'Q1', 'Q4', case-insensitive)
+        """
+        if re.match(r"^[1-4]$", value):
+            return value
+        m = re.match(r"^Q([1-4])$", value, re.IGNORECASE)
+        if m:
+            return m.group(1)
+        return None
+
+    ##########################################
+    ############# HELPERS ####################
+    ##########################################
+
+    def _get_month_name_map(self) -> dict[str, str]:
+        """Return a mapping from lowercase month names/abbreviations to zero-padded month numbers.
+
+        Built from babel locale data for English and the configured LANGUAGE.
+        Both full names and abbreviations are included; trailing dots are stripped
+        so e.g. German 'Jan.' and 'Jan' both resolve to '01'.
+        """
+        from babel import Locale, UnknownLocaleError
+
+        result: dict[str, str] = {}
+        for locale_code in self._get_month_locales():
+            try:
+                locale = Locale(locale_code)
+            except UnknownLocaleError:
+                self.logging.warning("Unsupported locale code '%s' for month name parsing, skipping.", locale_code)
+                continue
+            for context in ("format", "stand-alone"):
+                for width in ("wide", "abbreviated"):
+                    for month_num, name in locale.months[context][width].items():
+                        result[name.lower().rstrip(".")] = "%02d" % month_num
+        return result
+
+    def _get_month_locales(self) -> list[str]:
+        """Return babel locale codes for month name parsing (English always included as baseline)."""
+        language_to_locale: dict[str, str] = {
+            "german":     "de",
+            "english":    "en",
+            "french":     "fr",
+            "spanish":    "es",
+            "italian":    "it",
+            "portuguese": "pt",
+            "dutch":      "nl",
+            "polish":     "pl",
+            "russian":    "ru",
+        }
+        language = self._helper_config.get_string_val("LANGUAGE", default="German").lower()
+        locale_code = language_to_locale.get(language, language)  # fallback: use raw value as locale code
+        locales = ["en"]
+        if locale_code != "en":
+            locales.append(locale_code)
+        return locales
