@@ -90,7 +90,7 @@ class IngestionService:
         )
         # Boot up the document
         try:
-            await theDocument.boot()
+            theDocument.boot()
         except DocumentPathValidationError as e:
             self.logging.warning("Skipping: '%s': %s", file_path, e, color="yellow")
             return None
