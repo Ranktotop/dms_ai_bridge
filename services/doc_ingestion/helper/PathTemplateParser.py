@@ -17,7 +17,7 @@ class TemplateSegment:
     variable_name: str
     is_static: bool
     is_placeholder: bool
-    is_last: bool = False
+    is_wildcard: bool
     validator: Callable[[str], bool] | None = None
 
 
@@ -74,32 +74,44 @@ class PathTemplateParser:
         #iterate all segments
         template_segments:list[TemplateSegment] = []
         for index, segment in enumerate(segments):
-            #check if wrapped in <>
+            #check if wrapped in <> or [] to identify placeholders, and extract field name
             is_placeholder = bool(re.match(r"^[\[<][^/]+[\]>]$", segment))
             fieldname = segment if not is_placeholder else segment[1:-1].strip().lower()
-            #if is placeholder, make sure its in supported fields
-            if is_placeholder and fieldname not in supported_fields:
-                raise PathTemplateValidationError(
-                    "Invalid path template '%s': field name '%s' in segment '%s' is not supported. Supported fields are: %s"
-                    % (self._raw_path_template, fieldname, segment, ", ".join(sorted(supported_fields)))
-                ) 
-            #if placeholder, make sure its unique
-            if is_placeholder and any(s.fieldname == fieldname for s in template_segments):
-                raise PathTemplateValidationError(
-                    "Invalid path template '%s': duplicate field name '%s' in segment '%s'. Each field name can only be used once."
-                    % (self._raw_path_template, fieldname, segment)
-                )
-            #if placeholder is filename, mark as last
-            is_last = is_placeholder and fieldname == "filename"
+
+            # if placeholder...
+            if is_placeholder:
+                # make sure its in supported fields
+                if fieldname not in supported_fields:
+                    raise PathTemplateValidationError(
+                        "Invalid path template '%s': field name '%s' in segment '%s' is not supported. Supported fields are: %s"
+                        % (self._raw_path_template, fieldname, segment, ", ".join(sorted(supported_fields)))
+                    ) 
+                
+                # make sure its unique
+                if any(s.fieldname.lower() == fieldname.lower() for s in template_segments):
+                    raise PathTemplateValidationError(
+                        "Invalid path template '%s': duplicate field name '%s' in segment '%s'. Each field name can only be used once."
+                        % (self._raw_path_template, fieldname, segment)
+                    )
+                
+                #if wildcard placeholder, mark as such
+                is_wildcard = segment.startswith("[") and segment.endswith("]")
+
             template_segments.append(TemplateSegment(
                 index=index,
                 fieldname=segment,
                 variable_name=fieldname,
-                is_static=not is_placeholder,
+                is_static=not is_placeholder and not is_wildcard,
                 is_placeholder=is_placeholder,
-                is_last=is_last,
+                is_wildcard=is_wildcard,
                 validator=supported_fields.get(fieldname) if is_placeholder else None,
             ))
+        #make sure there is only one wildcard template
+        if sum(s.is_wildcard for s in template_segments) > 1:
+            raise PathTemplateValidationError(
+                "Invalid path template '%s': multiple wildcard fields are not allowed. Found: %s"
+                % (self._raw_path_template, ", ".join(s.fieldname for s in template_segments if s.is_wildcard))
+            )
         self._template_segments = template_segments
 
     ##########################################
@@ -115,7 +127,7 @@ class PathTemplateParser:
             "month":         self._validate_month,
             "day":           self._validate_day,
             "title":         self._validate_non_empty,
-            "filename":      self._validate_non_empty,
+            "tags":          None
         }
 
     ##########################################
@@ -196,6 +208,51 @@ class PathTemplateParser:
         segments_to_strip = matching_segment_index - static_segment_index
         stripped_segments = segments[segments_to_strip:]
         return os.path.join(root_path, *stripped_segments)
+    
+    def _find_filename_in_segments(self, segments: list[str]) -> str | None:
+        """
+        Checks the last segment of given segments for a valid filename (must have an extension).
+
+        Args:
+            segments (list[str]): List of path segments to check.
+
+        Returns:
+            str | None: The filename if a valid one is found, otherwise None.
+        """
+        if not segments:
+            return None
+        if len(segments) == 1:  
+            filename_segment = segments[0]
+        else:
+            filename_segment = segments[-1] # the last segment must be the filename
+        if not self._helper_file.get_file_extension(filename_segment):
+            return None
+        return filename_segment
+    
+    def _fill_templates_from_right(self, original_path:str, segments_without_filename: list[str]) -> None:
+        max_index = min(len(segments_without_filename)-1, len(self._template_segments)-1)
+        #iterate from right to left
+        for i in range(max_index):
+            # get segment and template
+            template = self._template_segments[-(i+1)]
+            segment = segments_without_filename[-(i+1)]
+
+            #if static, it MUST match exactly (case-insensitive)
+            if template.is_static:
+                if segment.lower() != template.fieldname.lower():
+                    raise DocumentPathValidationError(
+                        f"Segment '{segment}' at position {len(segments_without_filename)-1 - i} does not match expected static segment '{template.fieldname}' in template '{self._raw_path_template}' for path"
+                    )
+                continue
+
+            if template.is_placeholder:
+                if template.validator and not template.validator(segment):
+                    raise DocumentPathValidationError(
+                        f"Segment '{segment}' at position {len(segments_without_filename)-1 - i} failed validation for field '{template.variable_name}' in template '{self._raw_path_template}' for path"
+                    )
+                setattr(meta, template.variable_name, segment)
+
+
 
 
     def convert_path_to_metadata(self, file_path: str, root_path: str) -> DocMetadata:
@@ -209,17 +266,66 @@ class PathTemplateParser:
         - All template placeholders must be filled, otherwise raise DocumentPathValidationError
         """
 
-        # --------------------------
-        # 1. Relative path segments
-        # --------------------------
+        # Make sure we start on the correct segment
         stripped_path = self._strip_until_static_match(file_path, root_path)
         path_segments = self.get_segments_for_path(stripped_path, root_path)
         if not path_segments:
-            raise DocumentPathValidationError(f"Path '{file_path}' contains no segments")
+            raise DocumentPathValidationError(f"Path '{file_path}' contains no segments")    
 
-        meta = DocMetadata()
-        template_segments = self._template_segments
-        template_no_filename = template_segments[:-1]  # all segments except <filename>
+        # if we have only one segment, it must be the filename
+        filename = self._find_filename_in_segments(path_segments)
+        if not filename:
+            raise DocumentPathValidationError(f"Path '{file_path}' does not contain a valid filename segment")
+        
+        # Prepare meta
+        meta = DocMetadata(filename=filename)
+        dynamic_segments = path_segments[:-1]  # all segments except the last one which is filename
+        
+        #check if we have wildcard placeholders
+        template_start_index = 0
+        template_end_index = len(self._template_segments) - 1
+        wildcard_templates = [s for s in self._template_segments if s.is_wildcard]
+        # if wildcard is found, set end index to the wildcard index -1 
+
+
+        
+
+        # first we check filename
+        tmpl_filename = self._template_segments[-1]
+        seg_filename = path_segments[-1]
+        if not tmpl_filename.is_last or not self._helper_file.get_file_extension(seg_filename):
+            raise DocumentPathValidationError(f"Last segment '{seg_filename}' is not a valid filename as required by template '{self._raw_path_template}' for path '{file_path}'")
+        else:
+            #apply validation if set
+            if tmpl_filename.validator and not tmpl_filename.validator(seg_filename):
+                raise DocumentPathValidationError(
+                    f"Filename segment '{seg_filename}' failed validation for field '{tmpl_filename.variable_name}' in template '{self._raw_path_template}' for path '{file_path}'"
+                )
+            meta.filename = seg_filename
+
+        #fill up the dynamic fields in template and apply validations
+        for i in range(max_index):
+            template = dynamic_templates[i]
+            segment = dynamic_segments[i]
+
+            # if template is a static one...
+            if template.is_static:
+                # it must match exactly (case-insensitive)
+                if segment.lower() != template.fieldname.lower():
+                    raise DocumentPathValidationError(
+                        f"Segment '{segment}' at position {i} does not match expected static segment '{template.fieldname}' in template '{self._raw_path_template}' for path '{file_path}'"
+                    )
+                continue
+
+            # if is placeholder...
+            if template.is_placeholder:
+                #if there is a validator, it must pass
+                if template.validator and not template.validator(segment):
+                    raise DocumentPathValidationError(
+                        f"Segment '{segment}' at position {i} failed validation for field '{template.variable_name}' in template '{self._raw_path_template}' for path '{file_path}'"
+                    )
+                setattr(meta, template.variable_name, segment)
+
 
         # --------------------------
         # 2. Filename (always last)
