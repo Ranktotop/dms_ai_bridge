@@ -79,8 +79,11 @@ class FileScanner:
         resets.  Returns True only when the file has been unchanged for the
         entire observation window.  Returns False if the file disappears.
         """
+        try:
+            previous_size = os.path.getsize(file_path)
+        except OSError:
+            return False
         stable_readings = 0
-        previous_size = -1
         for _ in range(_FILE_STABLE_RETRIES):
             await asyncio.sleep(_FILE_STABLE_INTERVAL)
             try:
