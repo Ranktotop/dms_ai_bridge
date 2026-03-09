@@ -71,6 +71,7 @@ class Document():
         self._minimum_text_chars_for_direct_read = helper_config.get_number_val("DOC_INGESTION_MINIMUM_TEXT_CHARS_FOR_DIRECT_READ", 40)
         self._page_dpi = helper_config.get_number_val("DOC_INGESTION_PAGE_DPI", 150)
         self._vision_context_chars = helper_config.get_number_val("DOC_INGESTION_VISION_CONTEXT_CHARS", 300)
+        self._owner_company_name = helper_config.get_string_val("DOC_INGESTION_COMPANY_NAME", None)
 
         # files and paths 
         self._root_path = root_path
@@ -877,7 +878,7 @@ class Document():
 
             Return a JSON object with these fields (use null if unknown):
             {
-                "correspondent": "name of the company the document is addressed to (e.g. Saarstahl GmbH, Müller Versicherung AG). If no company name is found, use name of the person (without title) secondary. If person is also not found, set to null",
+                "correspondent": "the OTHER party in the document — not '%s'. If '%s' is the recipient, use the sender as correspondent. If '%s' is the sender, use the recipient as correspondent. Prefer company name (e.g. Saarstahl GmbH); fall back to person name without title. Set to null if no other party can be identified.",
                 "document_type": "type of document (e.g. Rechnung, Vertrag, Brief, Quittung)",
                 "title": "short document title",
                 "year": "4-digit year of document creation date, if detectable. Aka YYYY",
@@ -886,7 +887,7 @@ class Document():
             }
 
             Return ONLY the JSON object, no other text.
-            """ % self._language).strip()
+            """ % (self._language, self._owner_company_name, self._owner_company_name, self._owner_company_name)).strip()
     
     def _get_prompt_cache(self, 
         additional_doc_types: list[str] | None = None, 
