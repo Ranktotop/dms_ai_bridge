@@ -217,18 +217,57 @@ class DMSClientInterface(ClientInterface):
 
     @abstractmethod
     def _get_endpoint_create_correspondent(self) -> str:
+        """
+        Returns the endpoint path for creating correspondents on the dms system
+
+        Returns:
+            str: The endpoint path for creating correspondents (e.g. "/api/correspondents")
+
+        Raises:
+            NotImplementedError: If the method is not implemented in a subclass.
+        """
         pass
 
     @abstractmethod
     def _get_endpoint_create_document_type(self) -> str:
+        """
+        Returns the endpoint path for creating document types on the dms system
+
+        Returns:
+            str: The endpoint path for creating document types (e.g. "/api/document_types")
+
+        Raises:
+            NotImplementedError: If the method is not implemented in a subclass.
+        """
         pass
 
     @abstractmethod
     def _get_endpoint_create_tag(self) -> str:
+        """
+        Returns the endpoint path for creating tags on the dms system
+
+        Returns:
+            str: The endpoint path for creating tags (e.g. "/api/tags")
+
+        Raises:
+            NotImplementedError: If the method is not implemented in a subclass.
+        """
         pass
 
     @abstractmethod
     def _get_endpoint_update_document(self, document_id: int) -> str:
+        """
+        Returns the endpoint path for updating documents on the dms system
+
+        Args:
+            document_id (int): The ID of the document.
+
+        Returns:
+            str: The endpoint path for updating documents (e.g. "/api/documents/{id}")
+
+        Raises:
+            NotImplementedError: If the method is not implemented in a subclass.
+        """
         pass
 
     ##########################################
@@ -237,18 +276,59 @@ class DMSClientInterface(ClientInterface):
 
     @abstractmethod
     def get_create_correspondent_payload(self, name: str) -> dict:
+        """
+        Returns the payload for creating a new correspondent on the dms system. 
+        This is used in the do_create_correspondent() method.
+
+        Args:
+            name (str): The name of the correspondent to create.
+
+        Returns:
+            dict: The payload for the create correspondent request.
+        """
         pass
 
     @abstractmethod
     def get_create_document_type_payload(self, name: str) -> dict:
+        """
+        Returns the payload for creating a new document type on the dms system. 
+        This is used in the do_create_document_type() method.
+
+        Args:
+            name (str): The name of the document type to create.
+
+        Returns:
+            dict: The payload for the create document type request.
+        """
         pass
 
     @abstractmethod
     def get_create_tag_payload(self, name: str) -> dict:
+        """
+        Returns the payload for creating a new tag on the dms system. 
+        This is used in the do_create_tag() method.
+
+        Args:
+            name (str): The name of the tag to create.
+
+        Returns:
+            dict: The payload for the create tag request.
+        """
         pass
 
     @abstractmethod
     def get_update_document_payload(self, document_id: int, update: DocumentUpdateRequest) -> dict:
+        """
+        Returns the payload for updating a document on the dms system. 
+        This is used in the do_update_document() method.
+
+        Args:
+            document_id (int): The ID of the document to update.
+            update (DocumentUpdateRequest): The update request object.
+
+        Returns:
+            dict: The payload for the update document request.
+        """
         pass
 
     ##########################################
@@ -463,10 +543,7 @@ class DMSClientInterface(ClientInterface):
         document_type_details = self._parse_endpoint_document_type(resp.json())
         return document_type_details
 
-    ##########################################
     ############# WRITE REQUESTS #############
-    ##########################################
-
     @abstractmethod
     async def do_upload_document(
         self,
@@ -676,18 +753,51 @@ class DMSClientInterface(ClientInterface):
     ############# WRITE RESPONSES ############
     @abstractmethod
     def _parse_endpoint_create_correspondent(self, response: dict) -> int:
+        """
+        Parses the response from the create correspondent endpoint and returns the ID of the created correspondent.
+
+        Args:
+            response (dict): The raw response from the create correspondent endpoint.
+
+        Returns:
+            int: The ID of the created correspondent.        
+        """
         pass
 
     @abstractmethod
     def _parse_endpoint_create_document_type(self, response: dict) -> int:
+        """
+        Parses the response from the create document type endpoint and returns the ID of the created document type.
+
+        Args:
+            response (dict): The raw response from the create document type endpoint.
+        Returns:
+            int: The ID of the created document type.        
+        """
         pass
 
     @abstractmethod
     def _parse_endpoint_create_tag(self, response: dict) -> int:
+        """
+        Parses the response from the create tag endpoint and returns the ID of the created tag.
+
+        Args:
+            response (dict): The raw response from the create tag endpoint.
+        Returns:
+            int: The ID of the created tag.        
+        """
         pass
 
     @abstractmethod
     def _parse_endpoint_update_document(self, response: dict) -> bool:
+        """
+        Parses the response from the update document endpoint and returns whether the update was successful.
+
+        Args:
+            response (dict): The raw response from the update document endpoint.
+        Returns:
+            bool: True if the update was successful, False otherwise.        
+        """
         pass
 
     ############### LIST RESPONSES ###############

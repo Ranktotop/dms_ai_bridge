@@ -8,7 +8,6 @@ Per-engine (required to activate an engine):
     DOC_INGESTION_{ENGINE}_OWNER_ID  DMS owner_id (optional, falls back to global)
 
 Global fallbacks:
-    DOC_INGESTION_TEMPLATE           Default template (default: '{filename}')
     DOC_INGESTION_OWNER_ID           Default owner_id
     DOC_INGESTION_WATCH              Watch mode for all engines: 'true' / '1' (default: false)
 """
@@ -50,7 +49,6 @@ def _read_engine_tasks(dms_clients: list[DMSClientInterface]) -> list[_EngineTas
     An engine is activated when DOC_INGESTION_{ENGINE}_PATH is set.
     Template and owner_id fall back to global defaults if not set per-engine.
     """
-    global_template = os.getenv("DOC_INGESTION_TEMPLATE", _DEFAULT_TEMPLATE).strip()
     global_owner_raw = os.getenv("DOC_INGESTION_OWNER_ID", "").strip()
     global_owner_id = int(global_owner_raw) if global_owner_raw else None
 
@@ -71,10 +69,16 @@ def _read_engine_tasks(dms_clients: list[DMSClientInterface]) -> list[_EngineTas
                 engine, path,
             )
             continue
-
-        template = os.getenv(
-            "DOC_INGESTION_%s_TEMPLATE" % engine, global_template
-        ).strip()
+        
+        # Read the path template for engine
+        template_name = "DOC_INGESTION_%s_TEMPLATE" % engine
+        #if the env is not set, throw error
+        if template_name not in os.environ:
+            raise ValueError(f"Missing required environment variable '{template_name}' for engine '{engine}'.")
+        template = os.environ[template_name].strip()
+        #if template is empty, throw error
+        if not template:
+            raise ValueError(f"Environment variable '{template_name}' for engine '{engine}' cannot be empty.")
 
         owner_raw = os.getenv("DOC_INGESTION_%s_OWNER_ID" % engine, "").strip()
         owner_id = int(owner_raw) if owner_raw else global_owner_id

@@ -7,7 +7,6 @@ into each RAG backend with a generic metadata payload.
 
 import asyncio
 import hashlib
-import re
 import uuid
 
 from shared.clients.cache.CacheClientInterface import CacheClientInterface, KEY_FILTER_OPTIONS
@@ -18,116 +17,8 @@ from shared.clients.rag.models.Point import PointHighDetailsRequest, PointUpsert
 from shared.clients.llm.LLMClientInterface import LLMClientInterface
 from shared.helper.HelperConfig import HelperConfig
 
-CHUNK_SIZE = 1000       # characters per text chunk
-CHUNK_OVERLAP = 100     # character overlap between consecutive chunks
 UPSERT_BATCH_SIZE = 100 # max points per RAG upsert call
 DOC_CONCURRENCY = 5     # max parallel document syncs
-
-def _split_text(text: str) -> list[str]:
-    """Split document text into semantically coherent, overlapping chunks.
-
-    Uses a recursive strategy that tries structural separators in order
-    (Markdown headings → paragraphs → lines → sentences → words → characters).
-    Small pieces are merged back up to CHUNK_SIZE before overlap is added.
-
-    Args:
-        text (str): Full document text.
-
-    Returns:
-        list[str]: Ordered list of text chunks.
-    """
-    if not text:
-        return []
-    pieces = _recursive_split(text.strip(), 0)
-    merged = _merge_chunks(pieces)
-    return _add_overlap(merged)
-
-
-def _recursive_split(text: str, sep_idx: int) -> list[str]:
-    """Recursively split text using separators starting at sep_idx.
-
-    Returns the text unchanged if it already fits within CHUNK_SIZE.
-    Falls back to a hard character split if no separator produces multiple parts.
-
-    Args:
-        text (str): Text segment to split.
-        sep_idx (int): Index into separators to start from.
-
-    Returns:
-        list[str]: List of text pieces, each at most CHUNK_SIZE characters.
-    """
-    # Separators tried in order during recursive splitting.
-    # Each pattern splits at a semantic boundary; finer-grained fallbacks follow.
-    separators: list[re.Pattern[str]] = [
-        re.compile(r"(?=\n#{1,6} )"),  # Markdown headings (zero-width — keeps \n# with next chunk)
-        re.compile(r"\n\n+"),          # Blank lines / paragraphs
-        re.compile(r"\n"),             # Single line breaks
-        re.compile(r"(?<=[.!?]) +"),   # Sentence boundaries (period/!/?  stays with left chunk)
-        re.compile(r" +"),             # Word boundaries
-    ]
-    if len(text) <= CHUNK_SIZE:
-        return [text]
-    for i in range(sep_idx, len(separators)):
-        parts = [p.strip() for p in separators[i].split(text) if p.strip()]
-        if len(parts) > 1:
-            result: list[str] = []
-            for part in parts:
-                if len(part) <= CHUNK_SIZE:
-                    result.append(part)
-                else:
-                    result.extend(_recursive_split(part, i + 1))
-            return result
-    # Hard character fallback — no separator produced a split
-    return [text[j: j + CHUNK_SIZE] for j in range(0, len(text), CHUNK_SIZE)]
-
-
-def _merge_chunks(pieces: list[str]) -> list[str]:
-    """Merge consecutive small pieces into chunks up to CHUNK_SIZE.
-
-    Pieces are joined with a newline. If adding the next piece would exceed
-    CHUNK_SIZE the current buffer is flushed as a new chunk first.
-
-    Args:
-        pieces (list[str]): Atomic text pieces produced by _recursive_split.
-
-    Returns:
-        list[str]: Merged chunks, each at most CHUNK_SIZE characters.
-    """
-    chunks: list[str] = []
-    buf = ""
-    for piece in pieces:
-        candidate = (buf + "\n" + piece) if buf else piece
-        if len(candidate) <= CHUNK_SIZE:
-            buf = candidate
-        else:
-            if buf:
-                chunks.append(buf)
-            buf = piece
-    if buf:
-        chunks.append(buf)
-    return chunks
-
-
-def _add_overlap(chunks: list[str]) -> list[str]:
-    """Prepend the tail of the previous chunk to each subsequent chunk.
-
-    Overlap improves retrieval at chunk boundaries by giving the embedding
-    model context that spans two adjacent chunks.
-
-    Args:
-        chunks (list[str]): Merged chunks without overlap.
-
-    Returns:
-        list[str]: Chunks with CHUNK_OVERLAP characters of leading overlap
-                   (all chunks except the first).
-    """
-    if len(chunks) <= 1 or not CHUNK_OVERLAP:
-        return chunks
-    result = [chunks[0]]
-    for i in range(1, len(chunks)):
-        tail = chunks[i - 1][-CHUNK_OVERLAP:]
-        result.append(tail + "\n" + chunks[i])
-    return result
 
 
 def _compute_doc_hash(doc: DocumentHighDetails) -> str:
@@ -467,7 +358,7 @@ class SyncService:
             await self._delete_document_vectors(rag_client, engine, doc.id)
             return None
 
-        chunks = _split_text(doc.content)
+        chunks = rag_client.split_text(doc.content)
         if not chunks:
             self.logging.warning(
                 "Skipping document id=%s ('%s'): content produced no chunks.", doc.id, doc.title, color="yellow"

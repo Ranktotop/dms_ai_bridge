@@ -201,6 +201,48 @@ class SearchService:
             results.extend(points)
         results.sort(key=lambda r: r.chunk_index or 0)
         return results
+    
+    async def do_fetch_full_by_doc_id(
+        self,
+        doc_id: str,
+        dms_engine: str,
+        owner_id: str,
+    ) -> list[str]:
+        """Fetches the full content for a specific document by its DMS document ID.
+
+        Uses do_reconstruct_document_content() with exact-match filters — deterministic, no vector search.
+        Returns an empty list if the document is not found or not owned by owner_id.
+
+        Args:
+            doc_id: DMS document ID (string).
+            dms_engine: DMS engine name (e.g. "paperless").
+            owner_id: Owner ID as string — enforced for access isolation.
+
+        Returns:
+            list[str]: List of reconstructed document content for all RAG clients.
+        """
+        fetch_tasks = [
+            rag_client.do_reconstruct_document_content(
+                dms_engine=dms_engine,
+                dms_doc_id=doc_id,
+                owner_id=owner_id
+            )
+            for rag_client in self._rag_clients
+        ]
+        responses = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+
+        results: list[str] = []
+        for idx, content in enumerate(responses):
+            if isinstance(content, Exception):
+                self.logging.warning(
+                    "SearchService.do_fetch_full_by_doc_id: RAG client [%d] failed: %s",
+                    idx, content,
+                )
+                continue
+            #skip empty results
+            if content.strip():
+                results.append(content.strip())
+        return results
 
     ##########################################
     ############# HELPERS ####################

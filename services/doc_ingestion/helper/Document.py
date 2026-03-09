@@ -1,5 +1,7 @@
 from shared.helper.HelperConfig import HelperConfig
 from services.doc_ingestion.helper.DocumentConverter import DocumentConverter
+from services.doc_ingestion.helper.PathTemplateParser import PathTemplateParser
+from services.doc_ingestion.Dataclasses import DocMetadata
 from shared.clients.llm.LLMClientInterface import LLMClientInterface
 from shared.clients.dms.DMSClientInterface import DMSClientInterface
 from shared.clients.ocr.OCRClientInterface import OCRClientInterface
@@ -11,39 +13,9 @@ import fitz # PyMuPDF
 import base64
 import re
 import json
-from dataclasses import dataclass
 import hashlib
 
-class DocumentValidationError(Exception):
-    """
-    Raised when a document cannot be ingested due to a known, expected condition.
-    """
-class DocumentPathValidationError(Exception):
-    """
-    Raised when the path of an document does not fit the minimum requirements for metadata extraction, e.g. missing correspondent.
-    
-    Callers should log this as WARNING, not ERROR.
-    """
 
-@dataclass
-class DocMetadata:
-    """Metadata extracted for a single document.
-
-    Fields are populated from two sources (path template takes precedence over LLM):
-    - Path template parsing: correspondent, document_type, year, month, day, title
-    - LLM extraction from document content: fills any fields left empty by path parsing
-
-    All fields are optional strings. Numeric fields (year, month, day) are stored as
-    strings to avoid lossy int conversion for values like "01".
-    """
-
-    correspondent: str | None = None
-    document_type: str | None = None
-    year: str | None = None
-    month: str | None = None
-    day: str | None = None
-    title: str | None = None
-    filename: str | None = None
 
 class Document():
     """Represents a single file to be ingested into the DMS.
@@ -103,7 +75,7 @@ class Document():
         # files and paths 
         self._root_path = root_path
         self._source_file = source_file        
-        self._path_template = path_template or "{filename}"
+        self._path_template = path_template.strip()
         self._working_directory = os.path.join(working_directory, str(uuid4().hex[:8]))
         if not file_bytes:
             with open(source_file, "rb") as f:
@@ -119,6 +91,7 @@ class Document():
         # helper
         self._helper_config = helper_config
         self._helper_file = HelperFile()
+        self._template_parser = PathTemplateParser(self._path_template, self._helper_config)
 
         # clients
         self._llm_client = llm_client
@@ -170,7 +143,7 @@ class Document():
             RuntimeError: If the working directory cannot be created, if required dependencies are missing, or if conversion fails.
         """
         # Gate, if the path template does not match, throw error
-        self._metadata_path = self._read_meta_from_path()
+        self._metadata_path = self._template_parser.convert_path_to_metadata(self._source_file, self._root_path)
 
         #create the working dir
         if not self._helper_file.create_folder(self._working_directory):
@@ -313,10 +286,13 @@ class Document():
             filename=self._helper_file.get_basename(self._source_file, True)
         )     
 
-        # make sure each field of DocMetadata is filled
+        # make sure each field of DocMetadata is filled (skip list fields — empty list is valid)
+        skip_fields = {"tags"}
         for field_name in content_meta.__dataclass_fields__.keys():
+            if field_name in skip_fields:
+                continue
             if not getattr(content_meta, field_name):
-                raise RuntimeError(f"Document: metadata field '{field_name}' is missing after LLM extraction for file '{self._source_filename}'")
+                raise RuntimeError("Document: metadata field '%s' is missing after LLM extraction for file '%s'" % (field_name, self._source_filename))
         self._metadata_final = content_meta
         #log as dict for better readability in logs
         self.logging.info("Metadata loaded for '%s'", self._source_filename, color="green")
@@ -336,9 +312,15 @@ class Document():
         # check if content was already extracted
         if not self._final_content:
             raise RuntimeError("Document: cannot extract tags, no final content available")
-        # fetch tags. This throws error if no tags are found
+        # fetch tags via LLM
         tags = await self._call_chat_llm_tags(additional_tags=additional_tags)
-        self._tags = tags
+        # prepend tags collected from the elastic zone of the path template
+        path_tags = self._metadata_path.tags if self._metadata_path else []
+        combined = list(path_tags)
+        for tag in tags:
+            if tag not in combined:
+                combined.append(tag)
+        self._tags = combined
         self.logging.info("Tags loaded for '%s'", self._source_filename, color="green")
         self.logging.debug(self._tags, color="blue")
 
@@ -803,66 +785,6 @@ class Document():
             raise ValueError(f"Tag extraction LLM response is not a list for file '{self._source_file}': {raw}")
         except Exception as e:
             raise RuntimeError(f"Failed to read tags from content using llm '{self._source_file}': {e}")    
-
-    ##########################################
-    ################# META ###################
-    ##########################################
-    def _read_meta_from_path(self) -> DocMetadata:
-        """Parse metadata from the file path using the configured path template.
-
-        Maps positional directory segments to template placeholders
-        (``{correspondent}``, ``{document_type}``, ``{year}``, ``{month}``,
-        ``{day}``, ``{title}``).  Each value is validated via
-        ``_validate_segment_from_path_meta`` before assignment; invalid values
-        (e.g. a non-numeric string for ``year``) are silently skipped.
-
-        Returns:
-            ``DocMetadata`` populated from the path.
-
-        Raises:
-            DocumentPathValidationError: If ``correspondent`` cannot be resolved
-                from the path (it is the only mandatory field).
-        """
-        known_vars = frozenset({
-            "correspondent", "document_type", "year", "month", "day", "title", "filename"
-        })
-        positional_vars = [m.group(1) for m in re.finditer(r"\{([^}]+)\}", self._path_template)
-            if m.group(1) != "filename"]
-        
-        try:
-            rel = os.path.relpath(self._source_file, self._root_path)
-        except ValueError:
-            rel = os.path.basename(self._source_file)
-
-        rel = rel.replace("\\", "/")
-        segments = rel.split("/")
-        filename = segments[-1]
-        dir_parts = segments[:-1]
-
-        path_meta = DocMetadata(filename=filename)
-        for i, var in enumerate(positional_vars):
-            if i >= len(dir_parts):
-                break
-            value = dir_parts[i]
-            if var in known_vars and self._validate_segment_from_path_meta(var, value):
-                setattr(path_meta, var, value)
-        if not path_meta.correspondent:
-            raise DocumentPathValidationError(
-                "Document: correspondent is required in path metadata but not found for file '%s' with template '%s'"
-                % (self._source_file, self._path_template)
-            )
-        return path_meta
-    
-    def _validate_segment_from_path_meta(self, var: str, value: str) -> bool:
-        """Return True if value is a valid assignment for var."""
-        numeric_validators: dict[str, re.Pattern] = {
-            "year":  re.compile(r"^\d{4}$"),
-            "month": re.compile(r"^\d{1,2}$"),
-            "day":   re.compile(r"^\d{1,2}$"),
-        }
-        if var in numeric_validators:
-            return bool(numeric_validators[var].match(value))
-        return bool(value.strip())            
 
     ##########################################
     ################# DMS ####################

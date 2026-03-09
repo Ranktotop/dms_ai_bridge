@@ -1,4 +1,5 @@
 from abc import abstractmethod
+import re
 
 import httpx
 from shared.clients.rag.models.Point import PointUpsert, PointHighDetails, PointsListResponse
@@ -508,3 +509,169 @@ class RAGClientInterface(ClientInterface):
             bool: True if the delete was successful, False otherwise.
         """
         pass
+
+    ##########################################
+    ############# HELPERS ####################
+    ##########################################
+
+    def get_chunk_size(self) -> int:
+        """Return the maximum character length per text chunk."""
+        return 1000
+
+    def get_chunk_overlap(self) -> int:
+        """Return the number of characters to overlap between consecutive chunks."""
+        return 100
+
+    def split_text(self, text: str) -> list[str]:
+        """Split document text into semantically coherent, overlapping chunks.
+
+        Uses a recursive strategy that tries structural separators in order
+        (Markdown headings → paragraphs → lines → sentences → words → characters).
+        Small pieces are merged back up to get_chunk_size() before overlap is added.
+
+        Args:
+            text (str): Full document text.
+
+        Returns:
+            list[str]: Ordered list of text chunks.
+        """
+        if not text:
+            return []
+        pieces = self._split_text_recursive(text.strip(), 0)
+        merged = self._merge_chunks(pieces)
+        return self._add_overlap(merged)
+
+    def _split_text_recursive(self, text: str, sep_idx: int) -> list[str]:
+        """Recursively split text using separators starting at sep_idx.
+
+        Returns the text unchanged if it already fits within get_chunk_size().
+        Falls back to a hard character split if no separator produces multiple parts.
+
+        Args:
+            text (str): Text segment to split.
+            sep_idx (int): Index into separators to start from.
+
+        Returns:
+            list[str]: List of text pieces, each at most get_chunk_size() characters.
+        """
+        # Separators tried in order during recursive splitting.
+        # Each pattern splits at a semantic boundary; finer-grained fallbacks follow.
+        separators: list[re.Pattern[str]] = [
+            re.compile(r"(?=\n#{1,6} )"),  # Markdown headings (zero-width — keeps \n# with next chunk)
+            re.compile(r"\n\n+"),          # Blank lines / paragraphs
+            re.compile(r"\n"),             # Single line breaks
+            re.compile(r"(?<=[.!?]) +"),   # Sentence boundaries (period/!/?  stays with left chunk)
+            re.compile(r" +"),             # Word boundaries
+        ]
+        chunk_size = self.get_chunk_size()
+        if len(text) <= chunk_size:
+            return [text]
+        for i in range(sep_idx, len(separators)):
+            parts = [p.strip() for p in separators[i].split(text) if p.strip()]
+            if len(parts) > 1:
+                result: list[str] = []
+                for part in parts:
+                    if len(part) <= chunk_size:
+                        result.append(part)
+                    else:
+                        result.extend(self._split_text_recursive(part, i + 1))
+                return result
+        # Hard character fallback — no separator produced a split
+        return [text[j: j + chunk_size] for j in range(0, len(text), chunk_size)]
+
+    def _merge_chunks(self, pieces: list[str]) -> list[str]:
+        """Merge consecutive small pieces into chunks up to get_chunk_size().
+
+        Pieces are joined with a newline. If adding the next piece would exceed
+        get_chunk_size() the current buffer is flushed as a new chunk first.
+
+        Args:
+            pieces (list[str]): Atomic text pieces produced by _split_text_recursive.
+
+        Returns:
+            list[str]: Merged chunks, each at most get_chunk_size() characters.
+        """
+        chunk_size = self.get_chunk_size()
+        chunks: list[str] = []
+        buf = ""
+        for piece in pieces:
+            candidate = (buf + "\n" + piece) if buf else piece
+            if len(candidate) <= chunk_size:
+                buf = candidate
+            else:
+                if buf:
+                    chunks.append(buf)
+                buf = piece
+        if buf:
+            chunks.append(buf)
+        return chunks
+
+    def _add_overlap(self, chunks: list[str]) -> list[str]:
+        """Prepend the tail of the previous chunk to each subsequent chunk.
+
+        Overlap improves retrieval at chunk boundaries by giving the embedding
+        model context that spans two adjacent chunks.
+
+        Args:
+            chunks (list[str]): Merged chunks without overlap.
+
+        Returns:
+            list[str]: Chunks with get_chunk_overlap() characters of leading overlap
+                       (all chunks except the first).
+        """
+        chunk_overlap = self.get_chunk_overlap()
+        if len(chunks) <= 1 or not chunk_overlap:
+            return chunks
+        result = [chunks[0]]
+        for i in range(1, len(chunks)):
+            tail = chunks[i - 1][-chunk_overlap:]
+            result.append(tail + "\n" + chunks[i])
+        return result
+
+    async def do_reconstruct_document_content(self, dms_engine: str, dms_doc_id: str, owner_id: str) -> str | None:
+        """Reconstruct the original document text from its RAG chunks.
+
+        Fetches all points for the given document, sorts them by chunk_index,
+        and strips the overlap prefix from each chunk (except the first) to
+        recover the original merged text segments. The segments are then joined
+        with a newline to form the reconstructed document content.
+
+        The reconstruction is exact with respect to the chunking pipeline:
+        for each chunk i > 0 the stored text is
+            original[i-1][-chunk_overlap:] + "\\n" + original[i]
+        so stripping that known prefix recovers original[i] iteratively.
+
+        Args:
+            dms_engine (str): DMS engine identifier (e.g. "paperless").
+            dms_doc_id (str): Document ID within that DMS engine.
+            owner_id (str): Owner ID as string — enforced for access isolation.
+        Returns:
+            str: Reconstructed document content, or None if no points were found.
+        """
+        points = await self.do_fetch_points(
+            filters=[
+                {"key": "dms_engine", "match": {"value": dms_engine}},
+                {"key": "dms_doc_id", "match": {"value": dms_doc_id}},
+                {"key": "owner_id",   "match": {"value": owner_id}},
+            ],
+            include_fields=["chunk_index", "chunk_text"],
+            with_vector=False,
+        )
+        if not points:
+            return None
+
+        points.sort(key=lambda p: p.chunk_index if p.chunk_index is not None else 0)
+
+        chunk_overlap = self.get_chunk_overlap()
+        originals: list[str] = []
+        for i, point in enumerate(points):
+            stored = point.chunk_text or ""
+            if i == 0 or not chunk_overlap:
+                originals.append(stored)
+            else:
+                # The stored text starts with original[i-1][-chunk_overlap:] + "\n".
+                # Strip that prefix to recover the original segment.
+                overlap_prefix_len = len(originals[i - 1][-chunk_overlap:]) + 1  # +1 for "\n"
+                originals.append(stored[overlap_prefix_len:])
+
+        return "\n".join(originals)

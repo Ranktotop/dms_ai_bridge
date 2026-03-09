@@ -4,6 +4,7 @@ from services.agent.tools.AgentToolInterface import AgentToolInterface
 from services.agent.tools.search_documents.AgentToolSearchDocuments import AgentToolSearchDocuments
 from services.agent.tools.list_filter_options.AgentToolListFilterOptions import AgentToolListFilterOptions
 from services.agent.tools.get_document_details.AgentToolGetDocumentDetails import AgentToolGetDocumentDetails
+from services.agent.tools.get_document_full.AgentToolGetDocumentFull import AgentToolGetDocumentFull
 from shared.clients.llm.LLMClientInterface import LLMClientInterface
 from shared.helper.HelperConfig import HelperConfig
 from services.rag_search.SearchService import SearchService
@@ -16,6 +17,7 @@ class AgentToolManager:
             AgentToolSearchDocuments(helper_config=helper_config, search_service=search_service, llm_client=llm_client),
             AgentToolListFilterOptions(helper_config=helper_config, search_service=search_service, llm_client=llm_client),
             AgentToolGetDocumentDetails(helper_config=helper_config, search_service=search_service, llm_client=llm_client),
+            AgentToolGetDocumentFull(helper_config=helper_config, search_service=search_service, llm_client=llm_client),
         ]
 
     ##########################################

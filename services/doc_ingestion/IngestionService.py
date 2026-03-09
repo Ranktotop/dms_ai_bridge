@@ -8,7 +8,8 @@ from shared.clients.dms.models.DocumentUpdate import DocumentUpdateRequest
 from shared.clients.llm.LLMClientInterface import LLMClientInterface
 from shared.clients.ocr.OCRClientInterface import OCRClientInterface
 from shared.helper.HelperConfig import HelperConfig
-from services.doc_ingestion.helper.Document import Document, DocumentValidationError, DocumentPathValidationError
+from services.doc_ingestion.helper.Document import Document
+from services.doc_ingestion.Exceptions import DocumentValidationError, DocumentPathValidationError
 from shared.helper.HelperFile import HelperFile
 
 class IngestionService:
