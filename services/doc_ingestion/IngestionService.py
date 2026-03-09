@@ -1,6 +1,5 @@
 """Core orchestrator for the document ingestion pipeline."""
 import hashlib
-from dataclasses import dataclass
 
 from shared.clients.cache.CacheClientInterface import CacheClientInterface, KEY_INGESTION_FILE
 from shared.clients.dms.DMSClientInterface import DMSClientInterface
@@ -40,97 +39,6 @@ class IngestionService:
     ##########################################
     ############# INGESTION ##################
     ##########################################
-
-    async def do_ingest_file(self, file_path: str, root_path: str) -> int | None:
-        """Ingest a single file into the DMS using a two-step upload + PATCH approach.
-
-        Steps:
-        1. Parse path template -> ParsedPathMetadata
-        2. Convert to PDF if needed (DocHelper) — original file is preserved for upload
-        3. Text/OCR extraction on the (possibly converted) PDF
-        4. Fill missing metadata via MetadataExtractor.do_extract_metadata()
-        5. Extract tags via MetadataExtractor.do_extract_tags()
-        6. Build title from formula: '{Correspondent} {DocType} {yyyy.mm.dd}'
-        7. Resolve/create correspondent, document_type, tags in DMS
-        8. Upload original file bytes (minimal — only file + owner_id)
-        9. PATCH document with full metadata (wins over Paperless OCR results)
-
-        Args:
-            file_path: Absolute path to the file.
-            root_path: Root scan directory (used for relative path calculation).
-
-        Returns:
-            DMS document ID on success, None on failure.
-        """
-
-        # Check file hash cache — skip immediately if already ingested
-        with open(file_path, "rb") as f:
-            file_bytes = f.read()
-        file_hash = hashlib.sha256(file_bytes).hexdigest()
-        cache_key = "%s:%s" % (KEY_INGESTION_FILE, file_hash)
-        cached_doc_id = await self._cache_client.do_get(cache_key)
-        if cached_doc_id is not None:
-            self.logging.info("Skipping '%s': already ingested (doc_id=%s).", file_path, cached_doc_id, color="blue")
-            return int(cached_doc_id)
-        
-        self.logging.info("Ingesting file '%s'...", file_path)
-
-        # Load the file as document
-        theDocument = Document(
-            root_path=root_path,
-            source_file=file_path,
-            working_directory=self._helper_file.generate_tempfolder(path_only=True),
-            helper_config=self._config,
-            llm_client=self._llm_client,
-            dms_client=self._dms_client,
-            path_template=self._template,
-            file_bytes=file_bytes,
-            file_hash=file_hash,
-            ocr_client=self._ocr_client,
-        )
-        # Boot up the document
-        try:
-            theDocument.boot()
-        except DocumentPathValidationError as e:
-            self.logging.warning("Skipping: '%s': %s", file_path, e, color="yellow")
-            return None
-        except Exception as e:
-            self.logging.error("Failed to boot document '%s': %s", file_path, e)
-            return None
-        
-        # Load the content
-        try:
-            await theDocument.load_content()
-        except Exception as e:
-            self.logging.error("Failed to load content for document '%s': %s", file_path, e)
-            return None
-        
-        # Format the content
-        try:
-            await theDocument.format_content()
-        except Exception as e:
-            self.logging.error("Failed to format content for document '%s': %s", file_path, e)
-            return None
-        
-        # Load the metadata
-        try:
-            await theDocument.load_metadata()
-        except Exception as e:
-            self.logging.error("Failed to load metadata for document '%s': %s", file_path, e)
-            return None
-        
-        # Load the tags
-        try:
-            await theDocument.load_tags()
-        except Exception as e:
-            self.logging.error("Failed to load tags for document '%s': %s", file_path, e)
-            return None
-        
-        # Upload to DMS
-        try:
-            await self._push_document(theDocument, cache_key)
-        finally:
-            theDocument.cleanup()
 
     async def do_ingest_files_batch(self, file_paths: list[str], root_path: str, batch_size: int = 0) -> None:
         """Ingest multiple files using a phased batch approach.

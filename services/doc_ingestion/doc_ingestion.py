@@ -128,7 +128,15 @@ async def _run_once(tasks: list[_EngineTask], helper_config: HelperConfig, llm_c
 
 
 async def _run_watch(tasks: list[_EngineTask], helper_config: HelperConfig, llm_client, cache_client, ocr_client) -> None:
-    """Watch each engine's directory concurrently and ingest on changes."""
+    """Watch each engine's directory concurrently and ingest on changes.
+
+    Detected files are placed into a per-engine queue after their size has
+    stabilised.  A single worker drains the queue in batches (controlled by
+    ``DOC_INGESTION_BATCH_SIZE``) and calls ``do_ingest_files_batch`` so that
+    only one batch is active at a time while the queue keeps accumulating.
+    """
+    batch_size = int(os.getenv("DOC_INGESTION_BATCH_SIZE", "0").strip())
+
     async def watch_engine(task: _EngineTask) -> None:
         service = IngestionService(
             helper_config=helper_config,
@@ -140,14 +148,35 @@ async def _run_watch(tasks: list[_EngineTask], helper_config: HelperConfig, llm_
             ocr_client=ocr_client,
         )
         scanner = FileScanner(root_path=task.path)
+        queue: asyncio.Queue[str] = asyncio.Queue()
+
         logging.info(
             "Engine '%s': starting watch mode on '%s'...", task.engine_name, task.path
         )
 
-        async def on_file_changed(file_path: str) -> None:
-            await service.do_ingest_file(file_path=file_path, root_path=task.path)
+        async def _worker() -> None:
+            while True:
+                file_path = await queue.get()
+                batch = [file_path]
+                # drain as many immediately available files as batch_size allows
+                while batch_size == 0 or len(batch) < batch_size:
+                    try:
+                        batch.append(queue.get_nowait())
+                    except asyncio.QueueEmpty:
+                        break
+                logging.info(
+                    "Engine '%s': processing batch of %d file(s).", task.engine_name, len(batch)
+                )
+                await service.do_ingest_files_batch(file_paths=batch, root_path=task.path)
+                for _ in batch:
+                    queue.task_done()
 
-        await scanner.watch(on_file_changed)
+        asyncio.ensure_future(_worker())
+
+        async def on_file_stable(file_path: str) -> None:
+            await queue.put(file_path)
+
+        await scanner.watch(on_file_stable)
 
     await asyncio.gather(*[watch_engine(t) for t in tasks])
 
