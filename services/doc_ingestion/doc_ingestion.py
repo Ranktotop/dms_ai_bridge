@@ -149,6 +149,7 @@ async def _run_watch(tasks: list[_EngineTask], helper_config: HelperConfig, llm_
         )
         scanner = FileScanner(root_path=task.path)
         queue: asyncio.Queue[str] = asyncio.Queue()
+        queued: set[str] = set()
 
         logging.info(
             "Engine '%s': starting watch mode on '%s'...", task.engine_name, task.path
@@ -158,10 +159,13 @@ async def _run_watch(tasks: list[_EngineTask], helper_config: HelperConfig, llm_
             while True:
                 file_path = await queue.get()
                 batch = [file_path]
+                queued.discard(file_path)
                 # drain as many immediately available files as batch_size allows
                 while batch_size == 0 or len(batch) < batch_size:
                     try:
-                        batch.append(queue.get_nowait())
+                        next_file = queue.get_nowait()
+                        batch.append(next_file)
+                        queued.discard(next_file)
                     except asyncio.QueueEmpty:
                         break
                 logging.info(
@@ -174,7 +178,9 @@ async def _run_watch(tasks: list[_EngineTask], helper_config: HelperConfig, llm_
         asyncio.ensure_future(_worker())
 
         async def on_file_stable(file_path: str) -> None:
-            await queue.put(file_path)
+            if file_path not in queued:
+                queued.add(file_path)
+                await queue.put(file_path)
 
         await scanner.watch(on_file_stable)
 

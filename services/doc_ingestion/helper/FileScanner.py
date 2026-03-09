@@ -21,6 +21,7 @@ class FileScanner:
 
     def __init__(self, root_path: str) -> None:
         self._root = Path(root_path)
+        self._observing: set[str] = set()
 
     def scan_once(self) -> list[str]:
         """Return absolute paths of all supported files under root_path."""
@@ -53,7 +54,8 @@ class FileScanner:
         async for changes in watchfiles.awatch(str(self._root)):
             for _, file_path in changes:
                 ext = os.path.splitext(file_path)[1].lower()
-                if ext in SUPPORTED_EXTENSIONS:
+                if ext in SUPPORTED_EXTENSIONS and file_path not in self._observing:
+                    self._observing.add(file_path)
                     asyncio.ensure_future(self._stabilize_then_call(file_path, callback))
 
     async def _stabilize_then_call(
@@ -62,8 +64,11 @@ class FileScanner:
         callback: Callable[[str], Awaitable[None]],
     ) -> None:
         """Wait until file_path is fully written, then invoke callback."""
-        if await self._is_file_stable(file_path):
-            await callback(file_path)
+        try:
+            if await self._is_file_stable(file_path):
+                await callback(file_path)
+        finally:
+            self._observing.discard(file_path)
 
     async def _is_file_stable(self, file_path: str) -> bool:
         """Observe the file for the full stability window before processing.
