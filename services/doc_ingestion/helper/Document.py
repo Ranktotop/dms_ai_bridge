@@ -677,16 +677,20 @@ class Document():
         Returns:
             list[str]: a single-element list containing the complete document Markdown.
         """
-        with open(self._converted_file, "rb") as f:
-            file_bytes = f.read()
-        filename = self._helper_file.get_basename(self._converted_file, with_extension=True)
-        markdown = await self._ocr_client.do_convert_pdf_to_markdown(file_bytes, filename)
-        if not markdown or not markdown.strip():
-            self.logging.error("Error extracting text by OCR client %s from file '%s'. Empty content", self._ocr_client.get_engine_name(), self._source_filename)
+        try:
+            with open(self._converted_file, "rb") as f:
+                file_bytes = f.read()
+            filename = self._helper_file.get_basename(self._converted_file, with_extension=True)
+            markdown = await self._ocr_client.do_convert_pdf_to_markdown(file_bytes, filename)
+            if not markdown or not markdown.strip():
+                self.logging.error("Error extracting text by OCR client %s from file '%s'. Empty content", self._ocr_client.get_engine_name(), self._source_filename)
+                return []
+            self.logging.info("Extracted text by OCR client %s from file '%s'", self._ocr_client.get_engine_name(), self._source_filename, color="green")
+            self.logging.debug(markdown, color="blue")
+            return [markdown]
+        except Exception as e:
+            self.logging.error("Error extracting text by OCR client %s from file '%s': %s", self._ocr_client.get_engine_name(), self._source_filename, e)
             return []
-        self.logging.info("Extracted text by OCR client %s from file '%s'", self._ocr_client.get_engine_name(), self._source_filename, color="green")
-        self.logging.debug(markdown, color="blue")
-        return [markdown]
 
     ##########################################
     ############ CONTENT FORMATTER ###########
