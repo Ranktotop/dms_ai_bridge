@@ -72,10 +72,13 @@ class Document():
         self._language = helper_config.get_string_val("LANGUAGE", "German")
 
         # settings
+        self._skip_direct_read = helper_config.get_bool_val("DOC_INGESTION_SKIP_DIRECT_READ", False)
+        self._skip_programmatic_read = helper_config.get_bool_val("DOC_INGESTION_SKIP_PROGRAMMATIC_READ", False)
+        self._skip_vision_read = helper_config.get_bool_val("DOC_INGESTION_SKIP_VISION_READ", False)
         self._skip_ocr_read = helper_config.get_bool_val("DOC_INGESTION_SKIP_OCR_READ", False)
+
         self._minimum_text_chars_for_direct_read = helper_config.get_number_val("DOC_INGESTION_MINIMUM_TEXT_CHARS_FOR_DIRECT_READ", 40)
         self._page_dpi = helper_config.get_number_val("DOC_INGESTION_PAGE_DPI", 150)
-        self._vision_context_chars = helper_config.get_number_val("DOC_INGESTION_VISION_CONTEXT_CHARS", 300)
         self._owner_company_name = helper_config.get_string_val("DOC_INGESTION_COMPANY_NAME", None)
 
         # files and paths
@@ -112,6 +115,7 @@ class Document():
         # file
         self._converted_file: str | None = None
         self._source_filename: str | None = None
+        self._source_extension: str | None = None
         self._converted_extension: str | None = None
 
         # content
@@ -172,6 +176,7 @@ class Document():
             # convert to processable format
             self._converted_file = self._converter.convert(self._source_file)
             self._converted_extension = self._helper_file.get_file_extension(self._converted_file, True, True)
+            self._source_extension = self._helper_file.get_file_extension(self._source_file, True, True)
             self._source_filename = self._helper_file.get_basename(self._source_file, True)
             self.logging.debug("Document now in supported format: '%s'", self._converted_file, color="green")
         except Exception as e:
@@ -189,45 +194,130 @@ class Document():
         if not self.is_booted():
             raise RuntimeError("Document: cannot extract text, document not booted")
 
-        # if we cann access the content directly
-        if self._converted_extension in self._get_direct_read_file_formats():
-            text = self._helper_file.read_text_file(self._converted_file)
-            if text is None or not text.strip():
-                raise RuntimeError("Error reading text directly from file '%s'" % self._converted_file)
-            # save the content
-            self._page_contents = [text]
-            self._content_needs_formatting = False
-            self.logging.info("Read text directly from '%s'", self._source_filename, color="green")
-            self.logging.debug(self._page_contents, color="blue")
+        # if direct read is enabled and usable
+        if self._converted_extension in self._get_direct_read_file_formats() and not self._skip_direct_read:
+            self._load_content_directly()
 
-        # if an OCR client is provided and OCR read is not skipped, use it
+        # if OCR is enabled and usable
         elif self._ocr_client is not None and not self._skip_ocr_read:
-            try:
-                self._page_contents = await self._read_file_ocr()
-                self._content_needs_formatting = False   # Docling produces ready-made Markdown
-            # if docling fails
-            except Exception as e:
-                # if vision llm is deactivated, simply try to read the file programmatically
-                if self._skip_ocr_read:
-                    self._page_contents = self._read_file_programatically()  # already logs the content
-                    self._content_needs_formatting = True
-                # if vision llm is activated, we use llm ocr to read the content
-                else:
-                    self._page_contents = await self._read_file_vision()  # already logs the content
-                    self._content_needs_formatting = True
+            await self._load_content_ocr()
 
-        # if vision llm is deactivated, simply try to read the file programmatically
-        elif self._skip_ocr_read:
-            self._page_contents = self._read_file_programatically()  # already logs the content
-            self._content_needs_formatting = True
-        # if vision llm is activated, we use llm ocr to read the content
+        # if vision llm is enabled and usable
+        elif not self._skip_vision_read:
+            await self._load_content_vision()
+
+        # if programmatic read is enabled and usable
+        elif self._source_extension in self._get_programmatic_read_file_formats() and not self._skip_programmatic_read:
+            self._load_content_programmatic()
+
+        # unprocessable wiht current configuration or file
         else:
-            self._page_contents = await self._read_file_vision()  # already logs the content
-            self._content_needs_formatting = True
+            raise RuntimeError("Document: no valid content loading method available for file '%s' with current configuration" % self._source_filename)
 
         # if we got no content, we raise an error
         if not self._page_contents:
             raise RuntimeError("No content extracted from document '%s'" % self._converted_file)
+        
+    async def _load_content_ocr(self) -> None:
+        """
+        Reads the file by using ocr client
+        Only usable if...
+            - _skip_ocr_read is disabled        
+        Falls back to vision reading -> programmatic reading -> direct reading
+        Sets _page_contents, _content_needs_formatting and logs the extracted content.
+        """
+        # if invalid call
+        if self._skip_ocr_read:
+            self.logging.warning("Called _load_content_ocr with skip_ocr_read configuration! Falling back to vision reading...")
+        if self._ocr_client is None:
+            self.logging.warning("Called _load_content_ocr without an OCR client configured! Falling back to vision reading...")
+        if self._skip_ocr_read or self._ocr_client is None:
+            await self._load_content_vision()
+            return
+
+        self._page_contents = await self._read_file_ocr()
+        self._content_needs_formatting = False
+        if not self._page_contents:
+            # if vision llm is deactivated, simply try to read the file programmatically
+            self.logging.warning("OCR failed, falling back to vision reading...")
+            await self._load_content_vision()
+
+    async def _load_content_vision(self) -> None:
+        """
+        Reads the file by using vision llm
+        Only usable if...
+            - _skip_vision_read is disabled        
+        Falls back to programmatic reading -> direct reading
+        Sets _page_contents, _content_needs_formatting and logs the extracted content.
+        """
+        # if invalid call
+        if self._skip_vision_read:
+            self.logging.warning("Called _load_content_vision with _skip_vision_read configuration! Falling back to programmatic reading...")
+            self._load_content_programmatic()
+            return
+        
+        self._page_contents = await self._read_file_vision()
+        self._content_needs_formatting = False
+        if not self._page_contents:
+            self.logging.warning("Vision failed, falling back to programmatic reading...")
+            self._load_content_programmatic()
+
+    def _load_content_programmatic(self) -> None:
+        """
+        Reads the file by using programmatic parsing (PyMuPDF)
+        Only usable if...
+            - the file format supports programmatic reading (e.g. pdf, docx)
+            - _skip_programmatic_read is disabled        
+        Falls back to direct reading
+        Sets _page_contents, _content_needs_formatting and logs the extracted content.
+        """
+        # if invalid call
+        unsupported = self._source_extension not in self._get_programmatic_read_file_formats()
+        if unsupported:
+            self.logging.warning("Called _load_content_programmatic for an unsupported file!")
+        if self._skip_programmatic_read:
+            self.logging.warning("Called _load_content_programmatic with _skip_programmatic_read configuration!")
+        if unsupported or self._skip_programmatic_read:
+            self._load_content_directly()
+            return
+        
+        self._page_contents = self._read_file_programatically()  # already logs the content
+        self._content_needs_formatting = True
+        if not self._page_contents:
+            self.logging.warning("Programmatic read failed, falling back to direct reading...")
+            self._load_content_directly()
+        
+    def _load_content_directly(self) -> None:
+        """
+        Reads the file as plain text file
+        Only usable if...
+            - the file format supports direct reading (e.g. txt, md)
+            - _skip_direct_read is disabled            
+        Sets _page_contents, _content_needs_formatting and logs the extracted content.
+        """
+        # if invalid call
+        unsupported = self._converted_extension not in self._get_direct_read_file_formats()
+        if unsupported:
+            self.logging.warning("Called _load_content_directly for an unsupported file!")
+        if self._skip_direct_read:
+            self.logging.warning("Called _load_content_directly with _skip_direct_read configuration!")
+        if unsupported or self._skip_direct_read:
+            self._page_contents = []
+            self._content_needs_formatting = True
+            return
+        
+        # read text file
+        text = self._helper_file.read_text_file(self._converted_file)
+        text = "" if text is None else text.strip()
+        if not text:
+            self.logging.error("Error reading text directly from file '%s'. Empty content", self._converted_file)
+            self._page_contents = []
+            self._content_needs_formatting = False
+        else:
+            self._page_contents = [text]
+            self._content_needs_formatting = False
+            self.logging.info("Read text directly from '%s'", self._source_filename, color="green")
+            self.logging.debug(self._page_contents, color="blue")
 
     async def format_content(self) -> None:
         """Phase 2: merge pages (if needed), extract metadata and tags via Chat LLM.
@@ -241,7 +331,7 @@ class Document():
         """
         # check if content was already extracted
         if not self._page_contents:
-            raise RuntimeError("Document: cannot format content, no page contents available")
+            raise RuntimeError("Cannot format content, no page contents available")
 
         # check if format is needed
         if not self._content_needs_formatting:
@@ -256,11 +346,11 @@ class Document():
             # make sure there is some text on the page
             if len(formatted) >= self._minimum_text_chars_for_direct_read:
                 formatted_pages.append(formatted)
-                self.logging.info(f"Formatted text page {idx + 1} by Chat LLM from file '{self._source_filename}'", color="green")
+                self.logging.info(f"Formatted text page {idx + 1}/{len(self._page_contents)} by Chat LLM from file '{self._source_filename}'", color="green")
                 self.logging.debug(formatted, color="blue")
                 continue
             else:
-                raise RuntimeError(f"Formatted content from Chat LLM is too short or empty for page {idx + 1} of file '{self._source_filename}'")
+                raise RuntimeError(f"Formatted content from Chat LLM is too short or empty for page {idx + 1}/{len(self._page_contents)} of file '{self._source_filename}'")
         self.logging.info("Formatted pages from '%s'", self._source_filename, color="green")
         self.logging.debug(formatted_pages, color="blue")
 
@@ -427,6 +517,7 @@ class Document():
         # file
         self._converted_file: str | None = None
         self._source_filename: str | None = None
+        self._source_extension: str | None = None
         self._converted_extension: str | None = None
 
         # content
@@ -454,6 +545,10 @@ class Document():
     def _get_direct_read_file_formats(self) -> list[str]:
         """Return a list of file extensions that can be read directly without page iteration. E.g., 'txt', 'md'..."""
         return ["txt", "md"]
+    
+    def _get_programmatic_read_file_formats(self) -> list[str]:
+        """Return a list of file extensions that can be read programmatically. E.g., 'pdf', 'docx'..."""
+        return ["pdf", "txt", "md", "docx", "doc", "odt", "ott", "xlsx", "xls", "ods", "csv", "pptx", "ppt", "odp", "rtf"]
 
     def get_title(self) -> str:
         """Return the document title as '{correspondent} {document_type} {DD.MM.YYYY}'."""
@@ -516,11 +611,11 @@ class Document():
                 # make sure there is some text on the page
                 if len(direct_text) >= self._minimum_text_chars_for_direct_read:
                     page_texts.append(direct_text)
-                    self.logging.info(f"Extracted text page {page_num + 1} programmatically from file '{self._source_filename}'", color="green")
+                    self.logging.info(f"Extracted text page {page_num + 1}/{len(doc)} programmatically from file '{self._source_filename}'", color="green")
                     self.logging.debug(direct_text, color="blue")
                     continue
                 else:
-                    self.logging.info(f"No text extracted programmatically from page {page_num + 1} of file '{self._source_filename}'", color="yellow")
+                    self.logging.info(f"No text extracted programmatically from page {page_num + 1}/{len(doc)} of file '{self._source_filename}'", color="yellow")
             doc.close()
         except Exception as e:
             self.logging.error("Error extracting text programmatically from file '%s': %s", self._converted_file, e)
@@ -536,6 +631,7 @@ class Document():
             List of extracted page texts.
         """
         page_texts: list[str] = []
+        vision_context_chars = self._helper_config.get_number_val("DOC_INGESTION_VISION_CONTEXT_CHARS", 300)    
         try:
             doc = fitz.open(self._converted_file)
             for page_num, page in enumerate(doc):
@@ -545,7 +641,7 @@ class Document():
                 b64 = base64.b64encode(png_bytes).decode("ascii")
 
                 # add some context of the previous page for helping the model to understand if there is a continuation of a table or section
-                context_before = page_texts[-1][-self._vision_context_chars:] if page_texts else ""
+                context_before = page_texts[-1][-vision_context_chars:] if page_texts else ""
 
                 # read the content using vision llm
                 text = await self._call_vision_llm(b64, context_before)
@@ -553,43 +649,41 @@ class Document():
                 # make sure there is some text on the page
                 if len(text) >= self._minimum_text_chars_for_direct_read:
                     page_texts.append(text)
-                    self.logging.info(f"Extracted text page {page_num + 1} by vision LLM from file '{self._source_filename}'", color="green")
+                    self.logging.info(f"Extracted text page {page_num + 1}/{len(doc)} by vision LLM from file '{self._source_filename}'", color="green")
                     self.logging.debug(text, color="blue")
                     continue
                 else:
-                    self.logging.info(f"No text extracted by vision LLM from page {page_num + 1} of file '{self._source_filename}' --> Falling back to direct reading", color="yellow")
+                    self.logging.info(f"No text extracted by vision LLM from page {page_num + 1}/{len(doc)} of file '{self._source_filename}' --> Falling back to direct reading", color="yellow")
                     # if there is NO content found on the page, retry it with direct reading
                     direct_text = page.get_text().strip()
                     # make sure there is some text on the page
                     if len(direct_text) >= self._minimum_text_chars_for_direct_read:
                         page_texts.append(direct_text)
-                        self.logging.info(f"Extracted text page {page_num + 1} by direct reading from file '{self._source_filename}'", color="green")
+                        self.logging.info(f"Extracted text page {page_num + 1}/{len(doc)} by direct reading from file '{self._source_filename}'", color="green")
                         self.logging.debug(direct_text, color="blue")
                         continue
                     else:
-                        self.logging.info(f"No text extracted by fallback direct reading from page {page_num + 1} of file '{self._source_filename}'", color="yellow")
+                        self.logging.info(f"No text extracted by fallback direct reading from page {page_num + 1}/{len(doc)} of file '{self._source_filename}'", color="yellow")
             doc.close()
         except Exception as e:
-            self.logging.error("Error extracting text by vision LLM from file '%s': %s", self._converted_file, e)
+            self.logging.error("Error extracting text by vision LLM from file '%s': %s", self._source_filename, e)
             return []
         return page_texts
 
     async def _read_file_ocr(self) -> list[str]:
-        """Uses the OCR client (e.g. Docling) to extract Markdown text from the document.
+        """
+        Uses the OCR client (e.g. Docling) to extract Markdown text from the document.
 
-        Returns a single-element list containing the complete document Markdown.
-
-        Raises:
-            RuntimeError: If the OCR client returns empty content.
+        Returns:
+            list[str]: a single-element list containing the complete document Markdown.
         """
         with open(self._converted_file, "rb") as f:
             file_bytes = f.read()
         filename = self._helper_file.get_basename(self._converted_file, with_extension=True)
         markdown = await self._ocr_client.do_convert_pdf_to_markdown(file_bytes, filename)
         if not markdown or not markdown.strip():
-            raise RuntimeError(
-                "Docling OCR returned empty content for '%s'" % self._converted_file
-            )
+            self.logging.error("Error extracting text by OCR client %s from file '%s'. Empty content", self._ocr_client.get_engine_name(), self._source_filename)
+            return []
         self.logging.info("Extracted text by OCR client %s from file '%s'", self._ocr_client.get_engine_name(), self._source_filename, color="green")
         self.logging.debug(markdown, color="blue")
         return [markdown]
@@ -724,16 +818,13 @@ class Document():
 
         Returns:
             str: The text content extracted by the Vision LLM, or an empty string if the call fails.
-        """
-        messages = [
-            {
-                "role": "user",
-                "content": self._get_prompt_vision_ocr(context=context_before),
-                "images": [png_b64_data],
-            }
-        ]
+        """    
         try:
-            result = await self._llm_client.do_chat_vision(messages=messages)
+            # get the prompt messages
+            prompt = await self._get_prompt_vision_ocr(image_bytes=png_b64_data, context=context_before)
+
+            # run the prompt messages through the LLM
+            result = await self._llm_client.do_chat_vision(prompt["messages"])
             result = re.sub(r"```[a-zA-Z]*\s*\n?(.*?)\n?```", r"\1", result.strip(), flags=re.DOTALL)
             return result.strip()
         except Exception as e:
@@ -750,10 +841,13 @@ class Document():
         Returns:
             str: The text content formatted by the Chat LLM, or an empty string if the call fails.
         """
-        prompt = self._get_prompt_format(unformatted_text=raw)
-        messages = [{"role": "user", "content": prompt}]
         try:
-            result = await self._llm_client.do_chat(messages)
+            # get the prompt messages
+            prompt = await self._get_prompt_format(unformatted_text=raw)
+
+            # run the prompt messages through the LLM
+            result = await self._llm_client.do_chat(prompt["messages"])
+            
             # Strip any code fences the model may wrap output in
             result = re.sub(r"```[a-zA-Z]*\s*\n?(.*?)\n?```", r"\1", result.strip(), flags=re.DOTALL)
             return result.strip()
@@ -779,13 +873,22 @@ class Document():
         Returns:
             Final assembled Markdown document string.
         """
-        # call llm for merging
-        prompt = self._get_prompt_merge(formatted_pages)
+        #if there is only one page, return it as the final content
+        if len(formatted_pages) == 1:
+            return formatted_pages[0]
+
         merge_boundaries: set[int] = set()
         try:
-            raw = await self._llm_client.do_chat([{"role": "user", "content": prompt}])
-            raw = re.sub(r"```(?:json)?\s*", "", raw).strip().rstrip("`")
-            data = json.loads(raw)
+            # get the prompt messages
+            prompt = await self._get_prompt_merge(pages=formatted_pages)
+
+            # run the prompt messages through the LLM
+            raw = await self._llm_client.do_chat(prompt["messages"])
+
+            # parse and validate the response json
+            data = self._prompt_client.validate_prompt_schema(prompt["config"], raw)
+            if data is None:
+                raise ValueError(f"LLM response did not match expected schema!")
             merge_boundaries = set(int(b) for b in (data.get("merge_at_boundaries") or []))
         except Exception as e:
             self.logging.warning("Call Chat LLM %s for merging failed for '%s': %s.\nContinue joining pages as-is.", self._llm_client.get_chat_model(), self._source_filename, e, color="yellow")
@@ -959,7 +1062,7 @@ class Document():
             additional_tags (list[str] | None): Optional list of additional tag name strings to include as hints in the prompt.
 
         Returns:
-            list[dict[str, str]]: List of messages (dicts with "role" and "content") ready to be sent to the chat LLM for metadata extraction.
+            dict[str, any]: Dict with keys config (PromptConfig) and messages (dicts with "role" and "content") ready to be sent to the chat LLM.
         """
         # Read existing values
         doc_types = self._get_from_cache("document_types", additional_doc_types)
@@ -988,7 +1091,7 @@ class Document():
             "messages": dict_messages
         }
 
-    async def _get_prompt_tags(self, additional_tags: list[str] | None = None) -> str:
+    async def _get_prompt_tags(self, additional_tags: list[str] | None = None) -> dict[str, any]:
         """
         Uses the prompt client to fetch and render the tags extraction prompt, including existing DMS values as hints.
 
@@ -996,7 +1099,7 @@ class Document():
             additional_tags (list[str] | None): Optional list of additional tag name strings to include as hints in the prompt.
 
         Returns:
-            list[dict[str, str]]: List of messages (dicts with "role" and "content") ready to be sent to the chat LLM for tag extraction.
+            dict[str, any]: Dict with keys config (PromptConfig) and messages (dicts with "role" and "content") ready to be sent to the chat LLM.
         """
         # Read existing values
         tags = self._get_from_cache("tags", additional_tags)
@@ -1020,61 +1123,91 @@ class Document():
             "messages": dict_messages
         }
 
-    def _get_prompt_vision_ocr(self, context: str = "") -> str:
-        """Build the prompt for the Vision LLM OCR pass."""
-        context_hint = ("""
-            Context — the previous page ends with:"
-            ---
-            %s
-            ---
+    async def _get_prompt_vision_ocr(self, image_bytes:str, context: str = "") -> dict[str, any]:
+        """
+        Uses the prompt client to fetch and render the vision OCR prompt, including previous context as hints.
 
-            If this page continues a table or section from the previous page,
-            continue seamlessly without repeating column headers or section titles.
-            """ % context).strip()
-        context_hint = "" if not context.strip() else f"\n{context_hint}"
+        Args:
+            image_bytes (str): Base64-encoded string of the image to be processed by the vision OCR.
+            context (str): Optional string of previous context to include as hints in the prompt.
 
-        return ("""
-            /no_think
-            Convert this document page to clean Markdown.
+        Returns:
+            dict[str, any]: Dict with keys config (PromptConfig) and messages (dicts with "role" and "content") ready to be sent to the vision LLM.
 
-            Rules:
-                - Transcribe ONLY text that is actually visible in the image — never invent, guess, or fill in content.
-                - If a word or value is illegible, write [UNCLEAR] instead of guessing.
-                - Preserve ALL visible text and values exactly — do not summarise, skip, or paraphrase anything.
-                - Use ## for section headings.
-                - Use pipe tables for any tabular or structured key-value data.
-                - Use **bold** only for totals or key labels.
-                - Keep addresses, names, and flowing text as plain paragraphs.
-                - Output Markdown only — no explanations, no code fences, no commentary.
-            %s
-            """ % context_hint).strip()
+        Raises:
+            ValueError: If the prompt template does not contain at least one user message to attach the image to.
+        """       
+        # prepare replacements
+        replacements = {
+            "previous_context": context if context else "N/A"
+        }
+        # fetch prompt config and render the template
+        prompt = await self._prompt_client.do_fetch_prompt(id="doc_ingestion_vision_ocr")
+        messages = self._prompt_client.render_prompt(
+            prompt=prompt,
+            replacements=replacements)
+        # convert to dict and return
+        dict_messages = [{"role": m.role, "content": m.content} for m in messages]
 
-    def _get_prompt_vision_legacy(self) -> str:
-        """Build the prompt for the Vision LLM OCR pass in legacy mode (no formatting)."""
-        return ("""
-            Transcribe all text from this image exactly as it appears.
-            Output plain text only — no markdown, no bullet points, no headers, no formatting symbols. Preserve line breaks.
-            """).strip()
+        # iterate backwards the messages until the first user message is found. If found, add image-key
+        image_appended = False
+        for m in reversed(dict_messages):
+            if m["role"] == "user":
+                m["images"] = [image_bytes]
+                image_appended = True
+                break
 
-    def _get_prompt_format(self, unformatted_text: str) -> str:
-        """Build the prompt for the formatting pass of the chat LLM, given unformatted text."""
-        return ("""
-            You are a document formatter. Format the following extracted document text as clean Markdown.
-            Rules:\n"
-            - Preserve ALL text and values exactly — do not summarise or omit anything.
-            - Use ## for section headings.
-            - Use pipe tables for any tabular or structured key-value data.
-            - Use **bold** only for totals or key labels.
-            - Keep addresses, names, and flowing text as plain paragraphs.
-            - Output Markdown only — no explanations, no code fences.
-            Document text:
-            ---
-            %s
-            ---
-            """ % unformatted_text).strip()
+        # if the image was not appended, something is wrong with the prompt template. Raise error
+        if not image_appended:
+            raise ValueError("Vision OCR prompt template must contain at least one user message to attach the image to. Please check the prompt configuration for 'doc_ingestion_vision_ocr'.")
 
-    def _get_prompt_merge(self, pages: list[str]) -> str:
-        """Build the prompt for the page-merging pass of the chat LLM, given the boundary overview."""
+        return {
+            "config": prompt,
+            "messages": dict_messages
+        }
+
+    async def _get_prompt_format(self, unformatted_text: str) -> dict[str, any]:
+        """
+        Uses the prompt client to fetch and render the format prompt, including the unformatted text as input.
+
+        Args:
+            unformatted_text (str): The raw text of the document to be formatted.
+
+        Returns:
+            dict[str, any]: Dict with keys config (PromptConfig) and messages (dicts with "role" and "content") ready to be sent to the chat LLM.
+        """
+        # prepare replacements
+        replacements = {
+            "raw_content": unformatted_text
+        }
+        # fetch prompt config and render the template
+        prompt = await self._prompt_client.do_fetch_prompt(id="doc_ingestion_document_formatter")
+        messages = self._prompt_client.render_prompt(
+            prompt=prompt,
+            replacements=replacements)
+        
+        # count the length in chars. If it exceeds the model max, throw error
+        total_length = sum(len(m.content) for m in messages)
+        if total_length > self._llm_client.get_chat_model_max_chars():
+            raise ValueError(f"Formatted prompt messages exceed the maximum allowed characters for the chat model ({total_length} > {self._llm_client.get_chat_model_max_chars()}). Consider reducing the input text or increasing the model max chars if possible.")
+
+        # convert to dict and return
+        dict_messages = [{"role": m.role, "content": m.content} for m in messages]
+        return {
+            "config": prompt,
+            "messages": dict_messages
+        }
+
+    async def _get_prompt_merge(self, pages: list[str]) -> dict[str, any]:
+        """
+        Uses the prompt client to fetch and render the merge prompt, including the pages as boundary-inputs.
+
+        Args:
+            pages (list[str]): The list of page texts to be merged.
+
+        Returns:
+            dict[str, any]: Dict with keys config (PromptConfig) and messages (dicts with "role" and "content") ready to be sent to the chat LLM.
+        """
         boundary_snippets: list[str] = []
         for i in range(len(pages) - 1):
             lines_a = [l for l in pages[i].splitlines() if l.strip()]
@@ -1088,20 +1221,20 @@ class Document():
                 % (i, i + 1, i, tail_a, i + 1, head_b)
             )
 
-        overview = "\n\n".join(boundary_snippets)
-        return ("""
-            You are a document assembler. A multi-page document was formatted page by page.
-            Review the page boundaries below and identify where content flows across the break
-            (unfinished sentence, continuing list, interrupted paragraph).
-                  
-            Return a JSON object:
-            {"merge_at_boundaries": [0, 3, ...]}
-                  
-
-            Use the 0-based boundary index (boundary 0 = between page 0 and page 1).
-            Only include boundaries where text is clearly mid-flow.
-            Do NOT include natural section or topic breaks.
-            Return ONLY the JSON object.
-                  
-            %s
-            """ % overview).strip()
+        # prepare replacements
+        replacements = {
+            "boundary_snippets": "\n\n".join(boundary_snippets)
+        }
+        # fetch prompt config and render the template
+        prompt = await self._prompt_client.do_fetch_prompt(id="doc_ingestion_merge")
+        messages = self._prompt_client.render_prompt(
+            prompt=prompt,
+            replacements=replacements,
+            max_chars=self._llm_client.get_chat_model_max_chars())
+        
+        # convert to dict and return
+        dict_messages = [{"role": m.role, "content": m.content} for m in messages]
+        return {
+            "config": prompt,
+            "messages": dict_messages
+        }
