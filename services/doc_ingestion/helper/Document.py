@@ -201,10 +201,11 @@ class Document():
                 self._content_needs_formatting = False   # Docling produces ready-made Markdown
             # if docling fails
             except Exception as e:
-                #if vision is enabled, fallback to vision, otherwise fallback to direct read
+                # if vision llm is deactivated, simply try to read the file programmatically
                 if self._skip_ocr_read:
                     self._page_contents = self._read_file_programatically() # already logs the content
                     self._content_needs_formatting = True
+                # if vision llm is activated, we use llm ocr to read the content
                 else:
                     self._page_contents = await self._read_file_vision() # already logs the content
                     self._content_needs_formatting = True
