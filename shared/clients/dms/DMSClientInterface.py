@@ -48,6 +48,18 @@ class DMSClientInterface(ClientInterface):
         if self._cache_enriched_documents is None:
             raise Exception("Enriched document cache is not filled yet. Please call fill_cache() first.")
         return list(self._cache_enriched_documents.values())
+    
+    def get_document_view_url(self, document_id:str)->str:
+        """
+        Returns the URL to view the document with the given ID in the DMS frontend.
+
+        Args:
+            document_id (str): The ID of the document.
+
+        Returns:
+            str: The URL to view the document in the DMS frontend.
+        """
+        pass
 
     ################ ENDPOINTS ##################
     @abstractmethod
