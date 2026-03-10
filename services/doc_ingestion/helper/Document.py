@@ -196,8 +196,19 @@ class Document():
 
         # if an OCR client is provided and OCR read is not skipped, use it
         elif self._ocr_client is not None and not self._skip_ocr_read:
-            self._page_contents = await self._read_file_ocr()
-            self._content_needs_formatting = False   # Docling produces ready-made Markdown
+            try:
+                self._page_contents = await self._read_file_ocr()
+                self._content_needs_formatting = False   # Docling produces ready-made Markdown
+            # if docling fails
+            except Exception as e:
+                #if vision is enabled, fallback to vision, otherwise fallback to direct read
+                if self._skip_ocr_read:
+                    self._page_contents = self._read_file_programatically() # already logs the content
+                    self._content_needs_formatting = True
+                else:
+                    self._page_contents = await self._read_file_vision() # already logs the content
+                    self._content_needs_formatting = True
+
         # if vision llm is deactivated, simply try to read the file programmatically
         elif self._skip_ocr_read:
             self._page_contents = self._read_file_programatically() # already logs the content
