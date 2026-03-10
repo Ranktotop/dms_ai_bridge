@@ -14,7 +14,7 @@
                 }
             ],
             "schema": {
-                "name": "Schema",
+                "name": "DMSAIBridgeDocumentMetadataExtractor",
                 "description": "Extrahierte Metadaten eines Dokuments aus Sicht des verarbeitenden Unternehmens.",
                 "schema": {
                     "type": "object",
@@ -82,6 +82,49 @@
                 "language",
                 "existing_document_types",
                 "existing_correspondents",
+                "document_content"
+            ]
+        },
+        {
+            "id": "doc_ingestion_extract_tags",
+            "stage": "production",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "# Document-Tagger\nDu bist ein Dokument-Tagger, der passende Tags für ein Dokument aus einem Dokumenten-Management-System definiert.\n\n## Aufgabe\nAnalysiere den Dokumenten-Text, der dir gegeben wird, und weise ihm passende Tags zu.\n\n## Was ein Tag ist\nEin Tag (Label/Schlagwort) ist eine **breite, kategorische Beschreibung** des Dokuments – immer **ein einzelnes Wort**, immer **großgeschrieben**.\n\n**✅ Beispiele für GUTE Tags:** Rechtliches, Privat, Geschäftlich, Finanzen, Buchhaltung, Investitionen, Versicherung, Gesundheit\n\n## Was ein Tag NICHT ist\nEin Tag ist kein konkreter Dokumententyp, keine Zeitangabe, kein Korrespondent, kein Eigenname und besteht nie aus mehreren Wörtern.\n\n**❌ Beispiele für SCHLECHTE Tags:** Sparkasse Saar, Kontoauszug, Max Mustermann, Saarstahl GmbH, Eingangsrechnung, Januar2024\n\n## Bestehende Tags\nWähle primär Tags aus dieser Liste. Erstelle einen neuen Tag **nur dann**, wenn absolut kein bestehender Tag zum Dokument passt – im Zweifel immer einen bestehenden Tag bevorzugen:\n{{existing_tags}} \n\n## Regeln\n- Vergib **mindestens 1 und maximal 4 Tags** pro Dokument\n- Alle Tags müssen in der Sprache '{{language}}' sein\n- Tags beginnen immer mit einem **Großbuchstaben** (z.B. \"Finanzen\", nicht \"finanzen\")\n- Verwende nur Tags, die inhaltlich wirklich zum Dokument passen\n- Falls das Dokument keinen verwertbaren Inhalt hat, gib ein leeres Array zurück\n\n## Output\nAntworte **ausschließlich** mit einem validen JSON-Objekt. Kein Markdown, keine Erklärungen, kein Text davor oder danach. Beginne direkt mit `{` und ende mit `}`.\n\n**Schema:**\n```json\n{\n  \"tags\": [\"Tag1\", \"Tag2\"]\n}\n```"
+                },
+                {
+                    "role": "user",
+                    "content": "Definiere nun die Tags zu diesem Dokumenten-Inhalt und antworte ausschließlich mit dem JSON-Objekt:\n---\n{{document_content}} "
+                }
+            ],
+            "schema": {
+                "name": "DMSAIBridgeDocumentTagger",
+                "description": "Extrahierte Tags für ein Dokument aus einem Dokumenten-Management-System.",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "tags": {
+                            "type": "array",
+                            "description": "Liste der passenden Tags für das Dokument. Jeder Tag ist ein einzelnes, großgeschriebenes Wort in der vorgegebenen Sprache.",
+                            "items": {
+                                "type": "string",
+                                "description": "Ein einzelnes Schlagwort, das das Dokument kategorisch beschreibt. Beispiele: Finanzen, Rechtliches, Privat, Versicherung."
+                            },
+                            "minItems": 0,
+                            "maxItems": 5
+                        }
+                    },
+                    "required": [
+                        "tags"
+                    ],
+                    "additionalProperties": false
+                },
+                "strict": false
+            },
+            "variables": [
+                "existing_tags",
+                "language",
                 "document_content"
             ]
         }

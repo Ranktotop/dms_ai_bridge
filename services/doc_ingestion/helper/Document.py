@@ -326,19 +326,22 @@ class Document():
             filename=self._helper_file.get_basename(self._source_file, True)
         )
 
-        # fallback: if year was found but month or day is missing, use file modification date
+        # fallback: if year/month/day is missing, use file modification date
         fallback_applied = False
-        if content_meta.year:
-            file_mtime = os.path.getmtime(self._source_file)
-            file_date = datetime.datetime.fromtimestamp(file_mtime)
-            if not content_meta.month:
-                content_meta.month = f"{file_date.month:02d}"
-                self.logging.info("Month missing — using file modification date month '%s' for '%s'", content_meta.month, self._source_filename, color="magenta")
-                fallback_applied = True
-            if not content_meta.day:
-                content_meta.day = f"{file_date.day:02d}"
-                self.logging.info("Day missing — using file modification date day '%s' for '%s'", content_meta.day, self._source_filename, color="magenta")
-                fallback_applied = True
+        file_mtime = os.path.getmtime(self._source_file)
+        file_date = datetime.datetime.fromtimestamp(file_mtime)
+        if not content_meta.year:
+            content_meta.year = str(file_date.year)
+            self.logging.info("Year missing — using file modification date year '%s' for '%s'", content_meta.year, self._source_filename, color="magenta")
+            fallback_applied = True
+        if not content_meta.month:
+            content_meta.month = f"{file_date.month:02d}"
+            self.logging.info("Month missing — using file modification date month '%s' for '%s'", content_meta.month, self._source_filename, color="magenta")
+            fallback_applied = True
+        if not content_meta.day:
+            content_meta.day = f"{file_date.day:02d}"
+            self.logging.info("Day missing — using file modification date day '%s' for '%s'", content_meta.day, self._source_filename, color="magenta")
+            fallback_applied = True
 
         # fallback: if title is empty, use filename without extension
         if not content_meta.title:
@@ -864,19 +867,22 @@ class Document():
         Raises:
             RuntimeError: If the LLM call fails or the response is not a valid JSON array or empty.
         """
-        prompt = self._get_prompt_tags(additional_tags=additional_tags) + self._final_content
-        prompt = prompt[:self._llm_client.get_chat_model_max_chars()]  # limit the prompt to the first x chars of the content
-        messages = [{"role": "user", "content": prompt}]
         try:
-            raw = await self._llm_client.do_chat(messages)
-            raw = re.sub(r"```(?:json)?\s*", "", raw).strip().rstrip("`")
-            data = json.loads(raw)
-            if isinstance(data, list):
-                # if empty throw error
-                if not data:
-                    raise ValueError(f"Tag extraction LLM response is an empty list for file '{self._source_file}'")
-                return [str(t) for t in data if t]
-            raise ValueError(f"Tag extraction LLM response is not a list for file '{self._source_file}': {raw}")
+            # get the prompt messages
+            prompt = await self._get_prompt_tags(additional_tags=additional_tags)
+
+            # run the prompt messages through the LLM
+            raw = await self._llm_client.do_chat(prompt["messages"])
+
+            # parse and validate the response json
+            data = self._prompt_client.validate_prompt_schema(prompt["config"], raw)
+            if data is None:
+                raise ValueError(f"LLM response did not match expected schema!")
+            
+            # if empty throw error
+            if not data["tags"]:
+                raise ValueError(f"Tag extraction LLM response is an empty list for file '{self._source_file}'")
+            return data["tags"]
         except Exception as e:
             raise RuntimeError(f"Failed to read tags from content using llm '{self._source_file}': {e}")
 
@@ -982,95 +988,37 @@ class Document():
             "messages": dict_messages
         }
 
-    def _get_prompt_cache(self,
-                          additional_doc_types: list[str] | None = None,
-                          additional_correspondents: list[str] | None = None,
-                          additional_tags: list[str] | None = None) -> str | None:
+    async def _get_prompt_tags(self, additional_tags: list[str] | None = None) -> str:
         """
-        Build an optional prompt segment listing existing DMS document types.
-        NOTE: additional_tags is currently not used in the prompt, but we prepare for the case that the LLM could already return some tags in the metadata extraction step in the future, so we include it here for completeness and future-proofing.
+        Uses the prompt client to fetch and render the tags extraction prompt, including existing DMS values as hints.
 
         Args:
-            additional_doc_types: Optional list of additional document type strings to include as hints in the prompt.
-            additional_correspondents: Optional list of additional correspondent strings to include as hints in the prompt.
-            additional_tags: Optional list of additional tag name strings to include as hints in the prompt.
-
-        Returns None if the DMS cache is empty or contains no document types and correspondents.
-        """
-        cache = self._get_dms_cache()
-        # first read from cache
-        cache_doc_types = cache.get("document_types", []) if cache else []
-        if additional_doc_types:
-            # add each additional doc type if not already in the list, to avoid duplicates in the prompt
-            for doc_type in additional_doc_types:
-                if doc_type not in cache_doc_types:
-                    cache_doc_types.append(doc_type)
-        cache_correspondents = cache.get("correspondents", []) if cache else []
-        if additional_correspondents:
-            # add each additional correspondent if not already in the list, to avoid duplicates in the prompt
-            for correspondent in additional_correspondents:
-                if correspondent not in cache_correspondents:
-                    cache_correspondents.append(correspondent)
-
-        # if there are no doc types or correspondents to show, return None to skip the prompt segment
-        if not cache_doc_types and not cache_correspondents:
-            return None
-        cache_line_doctypes = "Document types:\n%s" % ", ".join(cache_doc_types)
-        cache_line_correspondents = "Correspondents:\n%s" % ", ".join(cache_correspondents)
-        cache_line = "\n\n".join([line for line in [cache_line_doctypes, cache_line_correspondents] if line])
-        return ("""
-            EXISTING VALUES IN THE SYSTEM (use these exact names if they match):
-            %s
-            Only invent a new name if absolutely no existing value fits.
-            """ % cache_line).strip()
-
-    def _get_prompt_tags(self, additional_tags: list[str] | None = None) -> str:
-        """
-        Build the tag extraction prompt, including existing DMS tag names as hints.
-
-        Args:
-            additional_tags: Optional list of additional tag name strings to include as hints in the prompt.
+            additional_tags (list[str] | None): Optional list of additional tag name strings to include as hints in the prompt.
 
         Returns:
-            str: The complete prompt string for tag extraction, including any existing DMS tag names and the additional tags if provided.
+            list[dict[str, str]]: List of messages (dicts with "role" and "content") ready to be sent to the chat LLM for tag extraction.
         """
-        cache = self._get_dms_cache()
-        tag_names = cache.get("tags", []) if cache else []
-        if additional_tags:
-            # add each tag if not already in the list, to avoid duplicates in the prompt
-            for tag in additional_tags:
-                if tag not in tag_names:
-                    tag_names.append(tag)
-        tag_context = ", ".join(tag_names) if tag_names else "(none)"
-        return ("""
-            You are a document tagger. Select the most relevant tags for the document below.
+        # Read existing values
+        tags = self._get_from_cache("tags", additional_tags)
 
-            LANGUAGE: All tag names must be in %s.
-
-            WHAT A TAG IS:
-            - A broad document category: Rechnung, Gutschrift, Versicherung, Vertrag, Lohnzettel, Kündigung
-            - A time period: 2026, Q1 2026
-            - A business domain: Buchhaltung, Personal, Steuern, Marketing
-
-            WHAT A TAG IS NOT — never use these as tags:
-            - The correspondent or sender name (already stored in the correspondent field)
-            - Specific amounts, prices, tax rates, or percentages (e.g. "German VAT 19%%", "107.46 Euro")
-            - Bank details, IBANs, or technical reference numbers
-            - Overly generic words like "Company", "Document", "Payment", "Contact Information"
-
-            RULES:
-            1. PREFER existing tags — use exact names from the list if they fit.
-            2. Only propose a NEW tag if the document category is genuinely not covered by any existing tag.
-            3. Return at most 3 tags total.
-            4. Return [] if no tag applies.
-
-            EXISTING TAGS (prefer these exact names):
-            %s
-
-            Return ONLY a JSON array of tag name strings, e.g. ["Rechnung", "2026"].
-
-            Document text:
-            """ % (self._language, tag_context)).strip()
+        # prepare replacements
+        replacements = {
+            "language": self._language,
+            "document_content": self._final_content,
+            "existing_tags": ", ".join(tags) if tags else "(none)"
+        }
+        # fetch prompt config and render the template
+        prompt = await self._prompt_client.do_fetch_prompt(id="doc_ingestion_extract_tags")
+        messages = self._prompt_client.render_prompt(
+            prompt=prompt,
+            replacements=replacements,
+            max_chars=self._llm_client.get_chat_model_max_chars())
+        # convert to dict and return
+        dict_messages = [{"role": m.role, "content": m.content} for m in messages]
+        return {
+            "config": prompt,
+            "messages": dict_messages
+        }
 
     def _get_prompt_vision_ocr(self, context: str = "") -> str:
         """Build the prompt for the Vision LLM OCR pass."""

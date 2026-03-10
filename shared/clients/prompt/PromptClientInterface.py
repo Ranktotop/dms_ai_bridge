@@ -108,7 +108,10 @@ class PromptClientInterface(ClientInterface):
             self.logging.warning(f"Failed to write fallback prompt config for id '{prompt_config.id}' and stage '{prompt_config.stage}' to file for engine '{self.get_engine_name()}'.", color="yellow")
             return False
         else:
-            self.logging.info(f"Added prompt config with id '{prompt_config.id}' and stage '{prompt_config.stage}' to fallback configs of engine '{self.get_engine_name()}'.", color="green")
+            if not replaced:
+                self.logging.info(f"Added prompt config with id '{prompt_config.id}' and stage '{prompt_config.stage}' to fallback configs of engine '{self.get_engine_name()}'.", color="green")
+            else:
+                self.logging.debug(f"Updated prompt config with id '{prompt_config.id}' and stage '{prompt_config.stage}' to fallback configs of engine '{self.get_engine_name()}'.")
             # update cache
             self._load_fallback_prompts()
             return True
