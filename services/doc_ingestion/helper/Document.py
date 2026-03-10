@@ -6,6 +6,7 @@ from shared.clients.llm.LLMClientInterface import LLMClientInterface
 from shared.clients.dms.DMSClientInterface import DMSClientInterface
 from shared.clients.ocr.OCRClientInterface import OCRClientInterface
 import os
+import datetime
 from uuid import uuid4
 from shared.helper.HelperFile import HelperFile
 from collections import Counter
@@ -307,6 +308,36 @@ class Document():
             tags=llm_meta_tags,
             filename=self._helper_file.get_basename(self._source_file, True)
         )     
+
+        # fallback: if year was found but month or day is missing, use file modification date
+        fallback_applied = False
+        if content_meta.year:
+            file_mtime = os.path.getmtime(self._source_file)
+            file_date = datetime.datetime.fromtimestamp(file_mtime)
+            if not content_meta.month:
+                content_meta.month = f"{file_date.month:02d}"
+                self.logging.info("Month missing — using file modification date month '%s' for '%s'", content_meta.month, self._source_filename, color="magenta")
+                fallback_applied = True
+            if not content_meta.day:
+                content_meta.day = f"{file_date.day:02d}"
+                self.logging.info("Day missing — using file modification date day '%s' for '%s'", content_meta.day, self._source_filename, color="magenta")
+                fallback_applied = True
+
+        # fallback: if title is empty, use filename without extension
+        if not content_meta.title:
+            content_meta.title = self._helper_file.get_basename(self._source_file, False)
+            self.logging.info("Title missing — using filename '%s' as title for '%s'", content_meta.title, self._source_filename, color="magenta")
+            fallback_applied = True
+
+        # fallback: if document_type is empty, use generic placeholder
+        if not content_meta.document_type:
+            content_meta.document_type = "Unknown Document Type"
+            self.logging.info("Document type missing — using fallback 'Unknown Document Type' for '%s'", self._source_filename, color="magenta")
+            fallback_applied = True
+
+        # if fallback was applied, add tag "Todo"
+        if fallback_applied and "todo" not in [t.lower() for t in content_meta.tags]:
+            content_meta.tags.append("Todo")
 
         # make sure each field of DocMetadata is filled (skip list fields — empty list is valid)
         skip_fields = {"tags", "quarter"}

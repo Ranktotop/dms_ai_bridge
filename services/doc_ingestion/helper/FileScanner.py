@@ -12,8 +12,9 @@ except ImportError:
 
 SUPPORTED_EXTENSIONS = frozenset({".pdf", ".png", ".jpg", ".jpeg", ".txt", ".md"})
 
-_FILE_STABLE_INTERVAL = 5.0    # seconds between size checks
-_FILE_STABLE_RETRIES  = 12    # max checks before giving up (12 × 5 s = 60 s total)
+_FILE_STABLE_INTERVAL  = 5.0   # seconds between size checks
+_FILE_STABLE_RETRIES   = 24   # max checks before giving up (24 × 5 s = 120 s total)
+_FILE_STABLE_MIN_READS = 6    # consecutive stable readings required to declare file ready
 
 
 class FileScanner:
@@ -92,7 +93,9 @@ class FileScanner:
                 return False
             if current_size == previous_size:
                 stable_readings += 1
+                if stable_readings >= _FILE_STABLE_MIN_READS:
+                    return True
             else:
                 stable_readings = 0
                 previous_size = current_size
-        return stable_readings == _FILE_STABLE_RETRIES
+        return False
