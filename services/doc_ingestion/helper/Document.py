@@ -5,6 +5,7 @@ from services.doc_ingestion.Dataclasses import DocMetadata
 from shared.clients.llm.LLMClientInterface import LLMClientInterface
 from shared.clients.dms.DMSClientInterface import DMSClientInterface
 from shared.clients.ocr.OCRClientInterface import OCRClientInterface
+from shared.clients.prompt.PromptClientInterface import PromptClientInterface
 import os
 import datetime
 from uuid import uuid4
@@ -43,7 +44,8 @@ class Document():
                  path_template: str | None = None,
                  file_bytes: bytes = None,
                  file_hash: str | None = None,
-                 ocr_client: OCRClientInterface | None = None) -> None:
+                 ocr_client: OCRClientInterface | None = None,
+                 prompt_client: PromptClientInterface|None = None) -> None:
         """Initialise the document without performing any I/O.
 
         Args:
@@ -62,6 +64,8 @@ class Document():
                 ``{title}`` placeholders.  Defaults to ``{filename}``.
             file_bytes: Optional file content as bytes. If not passed it will be read automatically
             file_hash: Optional precomputed hash of the file content. If not passed it will be computed automatically during boot.
+            ocr_client: Optional OCR client. If not passed, the document will be processed without OCR and vision LLM.
+            prompt_client: Optional Prompt client. If not passed, the document will be processed without using the prompt client (e.g. for formatting, metadata and tag extraction).
         """
         # general 
         self.logging = helper_config.get_logger()
@@ -99,6 +103,7 @@ class Document():
         self._llm_client = llm_client
         self._dms_client = dms_client
         self._ocr_client = ocr_client
+        self._prompt_client = prompt_client
 
         # bootable
         ## helper
@@ -338,7 +343,7 @@ class Document():
         # fallback: if title is empty, use filename without extension
         if not content_meta.title:
             content_meta.title = self._helper_file.get_basename(self._source_file, False)
-            self.logging.info("Title missing — using filename '%s' as title for '%s'", content_meta.title, self._source_filename, color="magenta")
+            self.logging.info("Title missing — using filename '%s' as title", content_meta.title, color="magenta")
             fallback_applied = True
 
         # fallback: if document_type is empty, use generic placeholder
@@ -357,7 +362,7 @@ class Document():
             if field_name in skip_fields:
                 continue
             if not getattr(content_meta, field_name):
-                raise RuntimeError("Document: metadata field '%s' is missing after LLM extraction for file '%s'" % (field_name, self._source_filename))
+                raise RuntimeError("'%s' is missing after LLM extraction" % (field_name))
         self._metadata_final = content_meta
         #log as dict for better readability in logs
         self.logging.info("Metadata loaded for '%s'", self._source_filename, color="green")

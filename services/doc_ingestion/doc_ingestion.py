@@ -27,6 +27,8 @@ from shared.clients.llm.LLMClientManager import LLMClientManager
 from shared.clients.ocr.OCRClientManager import OCRClientManager
 from services.doc_ingestion.IngestionService import IngestionService
 from services.doc_ingestion.helper.FileScanner import FileScanner
+from shared.clients.prompt.PromptClientManager import PromptClientManager
+from shared.clients.prompt.PromptClientInterface import PromptClientInterface
 
 load_dotenv()
 logging = setup_logging()
@@ -100,7 +102,7 @@ def _read_engine_tasks(dms_clients: list[DMSClientInterface]) -> list[_EngineTas
     return tasks
 
 
-async def _run_once(tasks: list[_EngineTask], helper_config: HelperConfig, llm_client, cache_client, ocr_client) -> None:
+async def _run_once(tasks: list[_EngineTask], helper_config: HelperConfig, llm_client, cache_client, ocr_client, prompt_client: PromptClientInterface|None = None) -> None:
     """Scan each engine's directory once and ingest all found files in batches.
 
     Files are processed phase-by-phase within each batch so each LLM model
@@ -117,6 +119,7 @@ async def _run_once(tasks: list[_EngineTask], helper_config: HelperConfig, llm_c
             template=task.template,
             default_owner_id=task.owner_id,
             ocr_client=ocr_client,
+            prompt_client=prompt_client,
         )
         scanner = FileScanner(root_path=task.path)
         files = scanner.scan_once()
@@ -127,7 +130,7 @@ async def _run_once(tasks: list[_EngineTask], helper_config: HelperConfig, llm_c
         await service.do_ingest_files_batch(file_paths=files, root_path=task.path, batch_size=batch_size)
 
 
-async def _run_watch(tasks: list[_EngineTask], helper_config: HelperConfig, llm_client, cache_client, ocr_client) -> None:
+async def _run_watch(tasks: list[_EngineTask], helper_config: HelperConfig, llm_client, cache_client, ocr_client, prompt_client: PromptClientInterface|None = None) -> None:
     """Watch each engine's directory concurrently and ingest on changes.
 
     Detected files are placed into a per-engine queue after their size has
@@ -146,6 +149,7 @@ async def _run_watch(tasks: list[_EngineTask], helper_config: HelperConfig, llm_
             template=task.template,
             default_owner_id=task.owner_id,
             ocr_client=ocr_client,
+            prompt_client=prompt_client,
         )
         scanner = FileScanner(root_path=task.path)
         queue: asyncio.Queue[str] = asyncio.Queue()
@@ -195,9 +199,20 @@ async def run() -> None:
     llm_client = LLMClientManager(helper_config=helper_config).get_client()
     cache_client = CacheClientManager(helper_config=helper_config).get_client()
     ocr_client = OCRClientManager(helper_config=helper_config).get_client()
+    prompt_client = PromptClientManager(helper_config=helper_config).get_client()
 
+    # boot regular clients
     for client in [*dms_clients, llm_client, cache_client, ocr_client]:
         await client.boot()
+        await client.do_healthcheck()
+
+    # boot prompt client. If this fails note the user and continue
+    try:
+        await prompt_client.boot()
+        await prompt_client.do_healthcheck()
+    except Exception as e:
+        logging.error("Failed to boot prompt client: %s. Prompt-based features will be using local fallbacks. Error: %s", prompt_client._get_engine_name(), e)
+        prompt_client = None
 
     tasks = _read_engine_tasks(dms_clients)
     if not tasks:
@@ -212,12 +227,15 @@ async def run() -> None:
         await task.dms_client.fill_cache()
 
     if watch:
-        await _run_watch(tasks, helper_config, llm_client, cache_client, ocr_client)
+        await _run_watch(tasks, helper_config, llm_client, cache_client, ocr_client, prompt_client)
     else:
-        await _run_once(tasks, helper_config, llm_client, cache_client, ocr_client)
+        await _run_once(tasks, helper_config, llm_client, cache_client, ocr_client, prompt_client)
 
     for client in [*dms_clients, llm_client, cache_client, ocr_client]:
         await client.close()
+    # close if it was booted successfully
+    if prompt_client:
+        await prompt_client.close()
 
 
 def main() -> None:

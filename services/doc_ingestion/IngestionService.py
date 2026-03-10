@@ -6,6 +6,7 @@ from shared.clients.dms.DMSClientInterface import DMSClientInterface
 from shared.clients.dms.models.DocumentUpdate import DocumentUpdateRequest
 from shared.clients.llm.LLMClientInterface import LLMClientInterface
 from shared.clients.ocr.OCRClientInterface import OCRClientInterface
+from shared.clients.prompt.PromptClientInterface import PromptClientInterface
 from shared.helper.HelperConfig import HelperConfig
 from services.doc_ingestion.helper.Document import Document
 from services.doc_ingestion.Exceptions import DocumentValidationError, DocumentPathValidationError
@@ -25,6 +26,7 @@ class IngestionService:
         template: str | None = None,
         default_owner_id: int | None = None,
         ocr_client: OCRClientInterface | None = None,
+        prompt_client: PromptClientInterface|None = None
     ) -> None:
         self._config = helper_config
         self.logging = helper_config.get_logger()
@@ -34,6 +36,8 @@ class IngestionService:
         self._template = template
         self._default_owner_id = default_owner_id
         self._ocr_client = ocr_client
+        self._prompt_client = prompt_client
+
         self._helper_file = HelperFile()
 
     ##########################################
@@ -96,6 +100,7 @@ class IngestionService:
                 file_bytes=file_bytes,
                 file_hash=file_hash,
                 ocr_client=self._ocr_client,
+                prompt_client=self._prompt_client,
             )
             # boot the document
             try:
