@@ -71,14 +71,14 @@ def _read_engine_tasks(dms_clients: list[DMSClientInterface]) -> list[_EngineTas
                 engine, path,
             )
             continue
-        
+
         # Read the path template for engine
         template_name = "DOC_INGESTION_%s_TEMPLATE" % engine
-        #if the env is not set, throw error
+        # if the env is not set, throw error
         if template_name not in os.environ:
             raise ValueError(f"Missing required environment variable '{template_name}' for engine '{engine}'.")
         template = os.environ[template_name].strip()
-        #if template is empty, throw error
+        # if template is empty, throw error
         if not template:
             raise ValueError(f"Environment variable '{template_name}' for engine '{engine}' cannot be empty.")
 
@@ -102,7 +102,7 @@ def _read_engine_tasks(dms_clients: list[DMSClientInterface]) -> list[_EngineTas
     return tasks
 
 
-async def _run_once(tasks: list[_EngineTask], helper_config: HelperConfig, llm_client, cache_client, ocr_client, prompt_client: PromptClientInterface|None = None) -> None:
+async def _run_once(tasks: list[_EngineTask], helper_config: HelperConfig, llm_client, cache_client, ocr_client, prompt_client: PromptClientInterface | None = None) -> None:
     """Scan each engine's directory once and ingest all found files in batches.
 
     Files are processed phase-by-phase within each batch so each LLM model
@@ -130,7 +130,7 @@ async def _run_once(tasks: list[_EngineTask], helper_config: HelperConfig, llm_c
         await service.do_ingest_files_batch(file_paths=files, root_path=task.path, batch_size=batch_size)
 
 
-async def _run_watch(tasks: list[_EngineTask], helper_config: HelperConfig, llm_client, cache_client, ocr_client, prompt_client: PromptClientInterface|None = None) -> None:
+async def _run_watch(tasks: list[_EngineTask], helper_config: HelperConfig, llm_client, cache_client, ocr_client, prompt_client: PromptClientInterface | None = None) -> None:
     """Watch each engine's directory concurrently and ingest on changes.
 
     Detected files are placed into a per-engine queue after their size has
@@ -212,7 +212,6 @@ async def run() -> None:
         await prompt_client.do_healthcheck()
     except Exception as e:
         logging.error("Failed to boot prompt client: %s. Prompt-based features will be using local fallbacks. Error: %s", prompt_client._get_engine_name(), e)
-        prompt_client = None
 
     tasks = _read_engine_tasks(dms_clients)
     if not tasks:

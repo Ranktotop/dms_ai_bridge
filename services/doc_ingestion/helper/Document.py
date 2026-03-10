@@ -6,17 +6,17 @@ from shared.clients.llm.LLMClientInterface import LLMClientInterface
 from shared.clients.dms.DMSClientInterface import DMSClientInterface
 from shared.clients.ocr.OCRClientInterface import OCRClientInterface
 from shared.clients.prompt.PromptClientInterface import PromptClientInterface
+from shared.clients.prompt.models.Prompt import PromptConfigMessage, PromptConfig
 import os
 import datetime
 from uuid import uuid4
 from shared.helper.HelperFile import HelperFile
 from collections import Counter
-import fitz # PyMuPDF
+import fitz  # PyMuPDF
 import base64
 import re
 import json
 import hashlib
-
 
 
 class Document():
@@ -45,7 +45,7 @@ class Document():
                  file_bytes: bytes = None,
                  file_hash: str | None = None,
                  ocr_client: OCRClientInterface | None = None,
-                 prompt_client: PromptClientInterface|None = None) -> None:
+                 prompt_client: PromptClientInterface | None = None) -> None:
         """Initialise the document without performing any I/O.
 
         Args:
@@ -67,7 +67,7 @@ class Document():
             ocr_client: Optional OCR client. If not passed, the document will be processed without OCR and vision LLM.
             prompt_client: Optional Prompt client. If not passed, the document will be processed without using the prompt client (e.g. for formatting, metadata and tag extraction).
         """
-        # general 
+        # general
         self.logging = helper_config.get_logger()
         self._language = helper_config.get_string_val("LANGUAGE", "German")
 
@@ -78,9 +78,9 @@ class Document():
         self._vision_context_chars = helper_config.get_number_val("DOC_INGESTION_VISION_CONTEXT_CHARS", 300)
         self._owner_company_name = helper_config.get_string_val("DOC_INGESTION_COMPANY_NAME", None)
 
-        # files and paths 
+        # files and paths
         self._root_path = root_path
-        self._source_file = source_file        
+        self._source_file = source_file
         self._path_template = path_template.strip()
         self._working_directory = os.path.join(working_directory, str(uuid4().hex[:8]))
         if not file_bytes:
@@ -106,23 +106,23 @@ class Document():
         self._prompt_client = prompt_client
 
         # bootable
-        ## helper
-        self._converter: DocumentConverter | None = None  
+        # helper
+        self._converter: DocumentConverter | None = None
 
-        ## file
-        self._converted_file:str | None = None 
-        self._source_filename:str | None = None
-        self._converted_extension:str | None = None
+        # file
+        self._converted_file: str | None = None
+        self._source_filename: str | None = None
+        self._converted_extension: str | None = None
 
-        ## content
-        self._content_needs_formatting: bool|None = None
+        # content
+        self._content_needs_formatting: bool | None = None
         self._page_contents: list[str] | None = None
         self._final_content: str | None = None
-        
-        ## metadata
-        self._metadata_path:DocMetadata|None = None
-        self._metadata_final:DocMetadata|None = None
-        self._tags:list[str]|None = None
+
+        # metadata
+        self._metadata_path: DocMetadata | None = None
+        self._metadata_final: DocMetadata | None = None
+        self._tags: list[str] | None = None
 
     ##########################################
     ############### CORE #####################
@@ -152,24 +152,24 @@ class Document():
         # Gate, if the path template does not match, throw error
         self._metadata_path = self._template_parser.convert_path_to_metadata(self._source_file, self._root_path)
 
-        #create the working dir
+        # create the working dir
         if not self._helper_file.create_folder(self._working_directory):
             raise RuntimeError("Failed to create working directory for Document in '%s'" % self._working_directory)
-        
-        #wrap in try to cleanup on any error during boot
+
+        # wrap in try to cleanup on any error during boot
         try:
-            #check required dependencies
+            # check required dependencies
             if not self._llm_client.get_vision_model():
                 raise RuntimeError("Document: LLM_MODEL_VISION not configured, cannot process documents")
-            
-            #load converter
+
+            # load converter
             self._converter = DocumentConverter(
                 helper_config=self._helper_config,
                 working_directory=os.path.join(self._working_directory, "conversions")
             )
             self.logging.debug("Document converter initialized for file '%s'", self._source_file, color="green")
 
-            #convert to processable format
+            # convert to processable format
             self._converted_file = self._converter.convert(self._source_file)
             self._converted_extension = self._helper_file.get_file_extension(self._converted_file, True, True)
             self._source_filename = self._helper_file.get_basename(self._source_file, True)
@@ -185,15 +185,16 @@ class Document():
         Raises:
             RuntimeError: If the document is not booted, or if content extraction fails/returned no content.
         """
+
         if not self.is_booted():
             raise RuntimeError("Document: cannot extract text, document not booted")
-        
-        #if we cann access the content directly
+
+        # if we cann access the content directly
         if self._converted_extension in self._get_direct_read_file_formats():
             text = self._helper_file.read_text_file(self._converted_file)
             if text is None or not text.strip():
                 raise RuntimeError("Error reading text directly from file '%s'" % self._converted_file)
-            #save the content
+            # save the content
             self._page_contents = [text]
             self._content_needs_formatting = False
             self.logging.info("Read text directly from '%s'", self._source_filename, color="green")
@@ -208,23 +209,23 @@ class Document():
             except Exception as e:
                 # if vision llm is deactivated, simply try to read the file programmatically
                 if self._skip_ocr_read:
-                    self._page_contents = self._read_file_programatically() # already logs the content
+                    self._page_contents = self._read_file_programatically()  # already logs the content
                     self._content_needs_formatting = True
                 # if vision llm is activated, we use llm ocr to read the content
                 else:
-                    self._page_contents = await self._read_file_vision() # already logs the content
+                    self._page_contents = await self._read_file_vision()  # already logs the content
                     self._content_needs_formatting = True
 
         # if vision llm is deactivated, simply try to read the file programmatically
         elif self._skip_ocr_read:
-            self._page_contents = self._read_file_programatically() # already logs the content
+            self._page_contents = self._read_file_programatically()  # already logs the content
             self._content_needs_formatting = True
         # if vision llm is activated, we use llm ocr to read the content
         else:
-            self._page_contents = await self._read_file_vision() # already logs the content
+            self._page_contents = await self._read_file_vision()  # already logs the content
             self._content_needs_formatting = True
 
-        #if we got no content, we raise an error
+        # if we got no content, we raise an error
         if not self._page_contents:
             raise RuntimeError("No content extracted from document '%s'" % self._converted_file)
 
@@ -241,18 +242,18 @@ class Document():
         # check if content was already extracted
         if not self._page_contents:
             raise RuntimeError("Document: cannot format content, no page contents available")
-        
-        #check if format is needed
+
+        # check if format is needed
         if not self._content_needs_formatting:
             self._final_content = "\n\n".join(self._page_contents)
             return
-        
-        #format each page
+
+        # format each page
         formatted_pages: list[str] = []
         for idx, page in enumerate(self._page_contents):
             formatted = await self._call_chat_llm_format(page)
-            
-            #make sure there is some text on the page
+
+            # make sure there is some text on the page
             if len(formatted) >= self._minimum_text_chars_for_direct_read:
                 formatted_pages.append(formatted)
                 self.logging.info(f"Formatted text page {idx + 1} by Chat LLM from file '{self._source_filename}'", color="green")
@@ -261,10 +262,9 @@ class Document():
             else:
                 raise RuntimeError(f"Formatted content from Chat LLM is too short or empty for page {idx + 1} of file '{self._source_filename}'")
         self.logging.info("Formatted pages from '%s'", self._source_filename, color="green")
-        self.logging.debug(formatted_pages, color="blue")    
+        self.logging.debug(formatted_pages, color="blue")
 
-
-        #merge the pages into the final content
+        # merge the pages into the final content
         formatted_pages = self._remove_repeated_headers_footers(formatted_pages)
         formatted_pages = self._stitch_table_continuations(formatted_pages)
         self._final_content = await self._call_chat_llm_merge(formatted_pages)
@@ -273,11 +273,11 @@ class Document():
             raise RuntimeError(f"Final merged content from Chat LLM is empty for file '{self._source_filename}'")
         self.logging.info("Merged Formatted pages from '%s'", self._source_filename, color="green")
         self.logging.debug(self._final_content, color="blue")
-        
-    async def load_metadata(self, 
-        additional_doc_types: list[str] | None = None, 
-        additional_correspondents: list[str] | None = None, 
-        additional_tags: list[str] | None = None) -> None:
+
+    async def load_metadata(self,
+                            additional_doc_types: list[str] | None = None,
+                            additional_correspondents: list[str] | None = None,
+                            additional_tags: list[str] | None = None) -> None:
         """Phase 3: Fetch metadata from path and enrich them by using LLM on final_content
 
         Args:
@@ -290,30 +290,30 @@ class Document():
         # check if content was already extracted
         if not self._final_content:
             raise RuntimeError("Document: cannot extract metadata, no final content available")
-        
+
         # check if path meta is available
         if not self._metadata_path:
             raise RuntimeError("Document: cannot extract metadata, no path metadata available. Did you ran boot()?")
-            
+
         # fill up using llm
         llm_meta = await self._call_chat_llm_meta(
-            additional_doc_types=additional_doc_types, 
+            additional_doc_types=additional_doc_types,
             additional_correspondents=additional_correspondents,
             additional_tags=additional_tags)
-        # currently this is empty as we only extract tags from the content in the next phase, 
-        # but we prepare for the case that the LLM could already return 
+        # currently this is empty as we only extract tags from the content in the next phase,
+        # but we prepare for the case that the LLM could already return
         # some tags in the metadata extraction step in the future
-        llm_meta_tags = llm_meta.tags if llm_meta.tags else [] 
-        #for cleaner code we separate the tags here
+        llm_meta_tags = llm_meta.tags if llm_meta.tags else []
+        # for cleaner code we separate the tags here
         path_tags = self._metadata_path.tags if self._metadata_path.tags else []
-        
+
         # lets compare the tags (case insensitive) for avoid duplicates
         for tag in path_tags:
             if tag.lower() not in [t.lower() for t in llm_meta_tags]:
                 llm_meta_tags.append(tag)
-        #strip out empty lines
+        # strip out empty lines
         llm_meta_tags = [t.strip() for t in llm_meta_tags if t.strip()]
-        
+
         # merge path meta with llm meta (tags are processed later)
         content_meta = DocMetadata(
             correspondent=self._metadata_path.correspondent or llm_meta.correspondent,
@@ -324,7 +324,7 @@ class Document():
             title=self._metadata_path.title or llm_meta.title,
             tags=llm_meta_tags,
             filename=self._helper_file.get_basename(self._source_file, True)
-        )     
+        )
 
         # fallback: if year was found but month or day is missing, use file modification date
         fallback_applied = False
@@ -364,10 +364,9 @@ class Document():
             if not getattr(content_meta, field_name):
                 raise RuntimeError("'%s' is missing after LLM extraction" % (field_name))
         self._metadata_final = content_meta
-        #log as dict for better readability in logs
+        # log as dict for better readability in logs
         self.logging.info("Metadata loaded for '%s'", self._source_filename, color="green")
         self.logging.debug(self._metadata_final.__dataclass_fields__, color="blue")
-        
 
     async def load_tags(self, additional_tags: list[str] | None = None) -> None:
         """
@@ -382,7 +381,7 @@ class Document():
         # check if content was already extracted
         if not self._final_content:
             raise RuntimeError("Document: cannot extract tags, no final content available")
-        
+
         # use current tags if metadata extraction already found some
         current_tags = self._metadata_final.tags if self._metadata_final and self._metadata_final.tags else []
         # lets compare given additional tags with current tags (case insensitive) for avoid duplicates
@@ -415,27 +414,27 @@ class Document():
         temporary files are deleted even when ingestion fails.
         Safe to call even if ``boot()`` was never called or failed midway.
         """
-        #delete the working dir
+        # delete the working dir
         if not self._helper_file.remove_folder(self._working_directory):
             self.logging.warning(f"DocHelper: failed to delete working directory '{self._working_directory}' for converted files")
         # reset bootable
-        ## helper
-        self._converter: DocumentConverter | None = None  
+        # helper
+        self._converter: DocumentConverter | None = None
 
-        ## file
-        self._converted_file:str | None = None 
-        self._source_filename:str | None = None
-        self._converted_extension:str | None = None
+        # file
+        self._converted_file: str | None = None
+        self._source_filename: str | None = None
+        self._converted_extension: str | None = None
 
-        ## content
-        self._content_needs_formatting: bool|None = None
+        # content
+        self._content_needs_formatting: bool | None = None
         self._page_contents: list[str] | None = None
         self._final_content: str | None = None
-        
-        ## metadata
-        self._metadata_path:DocMetadata|None = None
-        self._metadata_final:DocMetadata|None = None
-        self._tags:list[str]|None = None
+
+        # metadata
+        self._metadata_path: DocMetadata | None = None
+        self._metadata_final: DocMetadata | None = None
+        self._tags: list[str] | None = None
 
     ##########################################
     ############### GETTER ###################
@@ -452,7 +451,7 @@ class Document():
     def _get_direct_read_file_formats(self) -> list[str]:
         """Return a list of file extensions that can be read directly without page iteration. E.g., 'txt', 'md'..."""
         return ["txt", "md"]
-    
+
     def get_title(self) -> str:
         """Return the document title as '{correspondent} {document_type} {DD.MM.YYYY}'."""
         return f"{self._metadata_final.correspondent} {self._metadata_final.document_type} {self._metadata_final.day}.{self._metadata_final.month}.{self._metadata_final.year}"
@@ -468,8 +467,8 @@ class Document():
     def get_content(self) -> str:
         """Return the Markdown-formatted document content."""
         return self._final_content
-    
-    def get_date_string(self, pattern:str = "%Y-%m-%d") -> str|None:
+
+    def get_date_string(self, pattern: str = "%Y-%m-%d") -> str | None:
         """Return the document creation date as a string in the given format, or None if not available."""
         if not self._metadata_final.year:
             return None
@@ -481,11 +480,11 @@ class Document():
             return dt.strftime(pattern)
         except ValueError:
             return None
-        
+
     def get_file_bytes(self) -> bytes:
         """Return the original file content as bytes."""
         return self._file_bytes
-    
+
     def get_file_hash(self) -> str:
         """Return the precomputed hash of the file content."""
         return self._file_hash
@@ -507,11 +506,11 @@ class Document():
             # open the document
             doc = fitz.open(self._converted_file)
 
-            #iterate pages
+            # iterate pages
             for page_num, page in enumerate(doc):
                 direct_text = page.get_text().strip()
 
-                #make sure there is some text on the page
+                # make sure there is some text on the page
                 if len(direct_text) >= self._minimum_text_chars_for_direct_read:
                     page_texts.append(direct_text)
                     self.logging.info(f"Extracted text page {page_num + 1} programmatically from file '{self._source_filename}'", color="green")
@@ -524,7 +523,7 @@ class Document():
             self.logging.error("Error extracting text programmatically from file '%s': %s", self._converted_file, e)
             return []
         return page_texts
-    
+
     async def _read_file_vision(self) -> list[str]:
         """
         Uses Vision-LLM to extract text from each page
@@ -537,28 +536,28 @@ class Document():
         try:
             doc = fitz.open(self._converted_file)
             for page_num, page in enumerate(doc):
-                #convert page to image as base64 for LLM input
+                # convert page to image as base64 for LLM input
                 pix = page.get_pixmap(dpi=self._page_dpi)
                 png_bytes = pix.tobytes("png")
                 b64 = base64.b64encode(png_bytes).decode("ascii")
 
-                #add some context of the previous page for helping the model to understand if there is a continuation of a table or section
+                # add some context of the previous page for helping the model to understand if there is a continuation of a table or section
                 context_before = page_texts[-1][-self._vision_context_chars:] if page_texts else ""
 
-                #read the content using vision llm
+                # read the content using vision llm
                 text = await self._call_vision_llm(b64, context_before)
 
-                #make sure there is some text on the page
+                # make sure there is some text on the page
                 if len(text) >= self._minimum_text_chars_for_direct_read:
                     page_texts.append(text)
                     self.logging.info(f"Extracted text page {page_num + 1} by vision LLM from file '{self._source_filename}'", color="green")
                     self.logging.debug(text, color="blue")
                     continue
-                else:          
-                    self.logging.info(f"No text extracted by vision LLM from page {page_num + 1} of file '{self._source_filename}' --> Falling back to direct reading", color="yellow")          
+                else:
+                    self.logging.info(f"No text extracted by vision LLM from page {page_num + 1} of file '{self._source_filename}' --> Falling back to direct reading", color="yellow")
                     # if there is NO content found on the page, retry it with direct reading
                     direct_text = page.get_text().strip()
-                    #make sure there is some text on the page
+                    # make sure there is some text on the page
                     if len(direct_text) >= self._minimum_text_chars_for_direct_read:
                         page_texts.append(direct_text)
                         self.logging.info(f"Extracted text page {page_num + 1} by direct reading from file '{self._source_filename}'", color="green")
@@ -656,7 +655,7 @@ class Document():
         Returns:
             Pages list with cross-page tables merged into single entries.
         """
-        # iterate all pages 
+        # iterate all pages
         new_pages: list[str] = []
         i = 0
         while i < len(formatted_pages):
@@ -711,7 +710,7 @@ class Document():
     ##########################################
     ################# LLM ####################
     ##########################################
-    
+
     async def _call_vision_llm(self, png_b64_data: str, context_before: str) -> str:
         """
         Send an image to the Vision LLM and return its content.
@@ -736,7 +735,7 @@ class Document():
             return result.strip()
         except Exception as e:
             self.logging.error("Call Vision LLM %s failed for '%s': %s", self._llm_client.get_vision_model(), self._source_filename, e)
-            return ""    
+            return ""
 
     async def _call_chat_llm_format(self, raw: str) -> str:
         """
@@ -758,7 +757,7 @@ class Document():
         except Exception as e:
             self.logging.error("Call Chat LLM %s for formatting failed for '%s': %s", self._llm_client.get_chat_model(), self._source_filename, e)
             return ""
-        
+
     async def _call_chat_llm_merge(self, formatted_pages: list[str]) -> str:
         """
         Detect and join boundaries where content flows across pages.
@@ -777,7 +776,7 @@ class Document():
         Returns:
             Final assembled Markdown document string.
         """
-        #call llm for merging
+        # call llm for merging
         prompt = self._get_prompt_merge(formatted_pages)
         merge_boundaries: set[int] = set()
         try:
@@ -798,12 +797,12 @@ class Document():
                 current = current.rstrip() + "\n" + formatted_pages[i].lstrip()
             result_parts.append(current)
             i += 1
-        return "\n\n".join(result_parts).strip()   
-    
-    async def _call_chat_llm_meta(self, 
-        additional_doc_types: list[str] | None = None, 
-        additional_correspondents: list[str] | None = None,
-        additional_tags: list[str] | None = None) -> DocMetadata:
+        return "\n\n".join(result_parts).strip()
+
+    async def _call_chat_llm_meta(self,
+                                  additional_doc_types: list[str] | None = None,
+                                  additional_correspondents: list[str] | None = None,
+                                  additional_tags: list[str] | None = None) -> DocMetadata:
         """Extract metadata from the formatted document content via the chat LLM.
 
         Sends the first 3 000 characters of the formatted content together with
@@ -822,19 +821,17 @@ class Document():
             RuntimeError: If the LLM call fails or the response cannot be
                 parsed as JSON.
         """
-        #read the existing data from dms cache
-        cache_prompt = self._get_prompt_cache(
-            additional_doc_types=additional_doc_types, 
-            additional_correspondents=additional_correspondents, 
-            additional_tags=additional_tags)
-        
-        prompt = self._get_prompt_extraction() + (cache_prompt or "") + "\n\nDocument text:\n" + self._final_content
-        prompt = prompt[:self._llm_client.get_chat_model_max_chars()]  # limit the prompt to the first x chars of the content, as the most relevant info is usually at the beginning of the document and to avoid hitting token limits
-        messages = [{"role": "user", "content": prompt}]
         try:
-            # run the prompt
+            # get the prompt messages
+            messages = await self._get_prompt_extraction(
+                additional_doc_types=additional_doc_types,
+                additional_correspondents=additional_correspondents,
+                additional_tags=additional_tags)
+
+            # run the prompt messages through the LLM
             raw = await self._llm_client.do_chat(messages)
-            #parse the respone json
+
+            # parse the response json
             raw = re.sub(r"```(?:json)?\s*", "", raw).strip().rstrip("`")
             data = json.loads(raw)
             return DocMetadata(
@@ -846,8 +843,8 @@ class Document():
                 title=data.get("title") or None,
                 filename=self._helper_file.get_basename(self._source_file, True))
         except Exception as e:
-            raise RuntimeError(f"Failed to read meta from content using llm '{self._source_file}': {e}")    
-        
+            raise RuntimeError(f"Failed to read meta from content using llm '{self._source_file}': {e}")
+
     async def _call_chat_llm_tags(self, additional_tags: list[str] | None = None) -> list[str]:
         """
         Extract tags from the formatted document content via the chat LLM.
@@ -873,13 +870,13 @@ class Document():
             raw = re.sub(r"```(?:json)?\s*", "", raw).strip().rstrip("`")
             data = json.loads(raw)
             if isinstance(data, list):
-                #if empty throw error
+                # if empty throw error
                 if not data:
                     raise ValueError(f"Tag extraction LLM response is an empty list for file '{self._source_file}'")
                 return [str(t) for t in data if t]
             raise ValueError(f"Tag extraction LLM response is not a list for file '{self._source_file}': {raw}")
         except Exception as e:
-            raise RuntimeError(f"Failed to read tags from content using llm '{self._source_file}': {e}")    
+            raise RuntimeError(f"Failed to read tags from content using llm '{self._source_file}': {e}")
 
     ##########################################
     ################# DMS ####################
@@ -912,39 +909,69 @@ class Document():
             if names:
                 result["correspondents"] = names
         return result
-    
+
+    def _get_from_cache(self, key: str, additionals: list[str] | None) -> list[str]:
+        """
+        Fetches a list of strings from the DMS cache for the given key (e.g., "document_types", "tags", "correspondents") 
+        and merges it with an optional list of additional strings, ensuring no duplicates (case-insensitive) in the final list.
+
+        Args:
+            key: The cache key to fetch (e.g., "document_types", "tags", "correspondents").
+            additionals: Optional list of additional strings to merge with the cached values.
+
+        Returns:
+            A merged list of strings from the cache and the additional list, without duplicates.
+        """
+        additionals = [] if additionals is None else additionals
+        cache = self._get_dms_cache()
+        cache_elements = cache.get(key, []) if cache else []
+        cache_elements_lower = [element.lower() for element in cache_elements]
+        if additionals:
+            # add each additional element if not already in the list, to avoid duplicates
+            # we compare case-insensitive to avoid duplicates with different capitalizations, but we keep the original capitalization in the final list
+            for element in additionals:
+                if element.lower() not in cache_elements_lower:
+                    cache_elements.append(element)
+        return cache_elements
+
     ##########################################
     ############### PROMPTS ##################
     ##########################################
 
-    def _get_prompt_extraction(self) -> str:
+    async def _get_prompt_extraction(self,
+                                     additional_doc_types: list[str] | None = None,
+                                     additional_correspondents: list[str] | None = None,
+                                     additional_tags: list[str] | None = None) -> list[PromptConfigMessage]:
         """Build the metadata extraction prompt for the chat LLM."""
-        return ("""
-            You are a document metadata extractor. Analyse the following document text and extract metadata.
+        # Read existing values
+        doc_types = self._get_from_cache("document_types", additional_doc_types)
+        correspondents = self._get_from_cache("correspondents", additional_correspondents)
+        tags = self._get_from_cache("tags", additional_tags)
 
-            LANGUAGE: All extracted text values must be in %s (except for the "correspondent" field).
+        # prepare replacements
+        replacements = {
+            "company": self._owner_company_name,
+            "language": self._language,
+            "document_content": self._final_content,
+            "existing_document_types": ", ".join(doc_types) if doc_types else "(none)",
+            "existing_correspondents": ", ".join(correspondents) if correspondents else "(none)",
+            "existing_tags": ", ".join(tags) if tags else "(none)"
+        }
+        # fetch prompt config and render the template
+        prompt = await self._prompt_client.do_fetch_prompt(id="doc_ingestion_extract_metadata")
+        return self._prompt_client.render_prompt(
+            prompt=prompt,
+            replacements=replacements,
+            max_chars=self._llm_client.get_chat_model_max_chars())
 
-            Return a JSON object with these fields (use null if unknown):
-            {
-                "correspondent": "the OTHER party in the document — not '%s'. If '%s' is the recipient, use the sender as correspondent. If '%s' is the sender, use the recipient as correspondent. Prefer company name (e.g. Saarstahl GmbH); fall back to person name without title. Set to null if no other party can be identified.",
-                "document_type": "type of document (e.g. Rechnung, Vertrag, Brief, Quittung)",
-                "title": "short document title",
-                "year": "4-digit year of document creation date, if detectable. Aka YYYY",
-                "month": "2-digit month of document creation date, if detectable. Aka MM",
-                "day": "2-digit day of document creation date, if detectable. Aka DD"
-            }
-
-            Return ONLY the JSON object, no other text.
-            """ % (self._language, self._owner_company_name, self._owner_company_name, self._owner_company_name)).strip()
-    
-    def _get_prompt_cache(self, 
-        additional_doc_types: list[str] | None = None, 
-        additional_correspondents: list[str] | None = None,
-        additional_tags: list[str] | None = None) -> str|None:
+    def _get_prompt_cache(self,
+                          additional_doc_types: list[str] | None = None,
+                          additional_correspondents: list[str] | None = None,
+                          additional_tags: list[str] | None = None) -> str | None:
         """
         Build an optional prompt segment listing existing DMS document types.
         NOTE: additional_tags is currently not used in the prompt, but we prepare for the case that the LLM could already return some tags in the metadata extraction step in the future, so we include it here for completeness and future-proofing.
-        
+
         Args:
             additional_doc_types: Optional list of additional document type strings to include as hints in the prompt.
             additional_correspondents: Optional list of additional correspondent strings to include as hints in the prompt.
@@ -953,21 +980,21 @@ class Document():
         Returns None if the DMS cache is empty or contains no document types and correspondents.
         """
         cache = self._get_dms_cache()
-        #first read from cache
+        # first read from cache
         cache_doc_types = cache.get("document_types", []) if cache else []
         if additional_doc_types:
-            #add each additional doc type if not already in the list, to avoid duplicates in the prompt
+            # add each additional doc type if not already in the list, to avoid duplicates in the prompt
             for doc_type in additional_doc_types:
                 if doc_type not in cache_doc_types:
                     cache_doc_types.append(doc_type)
         cache_correspondents = cache.get("correspondents", []) if cache else []
         if additional_correspondents:
-            #add each additional correspondent if not already in the list, to avoid duplicates in the prompt
+            # add each additional correspondent if not already in the list, to avoid duplicates in the prompt
             for correspondent in additional_correspondents:
                 if correspondent not in cache_correspondents:
                     cache_correspondents.append(correspondent)
 
-        #if there are no doc types or correspondents to show, return None to skip the prompt segment            
+        # if there are no doc types or correspondents to show, return None to skip the prompt segment
         if not cache_doc_types and not cache_correspondents:
             return None
         cache_line_doctypes = "Document types:\n%s" % ", ".join(cache_doc_types)
@@ -978,7 +1005,7 @@ class Document():
             %s
             Only invent a new name if absolutely no existing value fits.
             """ % cache_line).strip()
-    
+
     def _get_prompt_tags(self, additional_tags: list[str] | None = None) -> str:
         """
         Build the tag extraction prompt, including existing DMS tag names as hints.
@@ -989,10 +1016,10 @@ class Document():
         Returns:
             str: The complete prompt string for tag extraction, including any existing DMS tag names and the additional tags if provided.
         """
-        cache = self._get_dms_cache()        
+        cache = self._get_dms_cache()
         tag_names = cache.get("tags", []) if cache else []
         if additional_tags:
-            #add each tag if not already in the list, to avoid duplicates in the prompt
+            # add each tag if not already in the list, to avoid duplicates in the prompt
             for tag in additional_tags:
                 if tag not in tag_names:
                     tag_names.append(tag)
@@ -1026,8 +1053,8 @@ class Document():
 
             Document text:
             """ % (self._language, tag_context)).strip()
-    
-    def _get_prompt_vision_ocr(self, context: str ="") -> str:
+
+    def _get_prompt_vision_ocr(self, context: str = "") -> str:
         """Build the prompt for the Vision LLM OCR pass."""
         context_hint = ("""
             Context — the previous page ends with:"
@@ -1055,15 +1082,15 @@ class Document():
                 - Output Markdown only — no explanations, no code fences, no commentary.
             %s
             """ % context_hint).strip()
-    
+
     def _get_prompt_vision_legacy(self) -> str:
-        """Build the prompt for the Vision LLM OCR pass in legacy mode (no formatting)."""        
+        """Build the prompt for the Vision LLM OCR pass in legacy mode (no formatting)."""
         return ("""
             Transcribe all text from this image exactly as it appears.
             Output plain text only — no markdown, no bullet points, no headers, no formatting symbols. Preserve line breaks.
             """).strip()
-    
-    def _get_prompt_format(self, unformatted_text:str)->str:
+
+    def _get_prompt_format(self, unformatted_text: str) -> str:
         """Build the prompt for the formatting pass of the chat LLM, given unformatted text."""
         return ("""
             You are a document formatter. Format the following extracted document text as clean Markdown.
@@ -1079,7 +1106,7 @@ class Document():
             %s
             ---
             """ % unformatted_text).strip()
-    
+
     def _get_prompt_merge(self, pages: list[str]) -> str:
         """Build the prompt for the page-merging pass of the chat LLM, given the boundary overview."""
         boundary_snippets: list[str] = []
@@ -1089,7 +1116,7 @@ class Document():
             # take last 5 non-empty lines of page A and first 5 non-empty lines of page B for context
             tail_a = "\n".join(lines_a[-5:])
             head_b = "\n".join(lines_b[:5])
-            
+
             boundary_snippets.append(
                 "--- Boundary %d→%d ---\nEnd of page %d:\n%s\nStart of page %d:\n%s"
                 % (i, i + 1, i, tail_a, i + 1, head_b)
@@ -1111,4 +1138,4 @@ class Document():
             Return ONLY the JSON object.
                   
             %s
-            """ % overview).strip()    
+            """ % overview).strip()

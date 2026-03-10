@@ -50,58 +50,139 @@ class PromptClientAgenta(PromptClientInterface):
     def _get_endpoint_list_apps(self) -> str:
         return "apps"
 
-    def _get_endpoint_list_environments(self, app_id:str) -> str:
+    def _get_endpoint_list_environments(self, app_id: str) -> str:
         return f"apps/{app_id}/environments"
 
     def _get_endpoint_fetch_prompt_config(self) -> str:
         return f"variants/configs/fetch"
 
     ##########################################
+    ############## REQUESTS ##################
+    ##########################################
+
+    async def _search_apps(self, app_name: str, only_one: bool = False) -> list[dict] | dict | None:
+        """
+        Search for apps with a name matching the given app_name (case-insensitive).
+
+        Args:
+            app_name (str): The name of the app to search for.
+            only_one (bool): If true only the first matching app gets returned
+
+        Returns:
+            list[dict]|dict|None: A list of apps matching the given name or single dict if only_one is True. Returns None if only_one is True but no apps are found
+        """
+        _response = await self.do_request(
+            method="GET",
+            endpoint=self._get_endpoint_list_apps(),
+            raise_on_error=True,
+        )
+        apps = _response.json()
+        app_list = [app for app in apps if app.get("app_id", None) and app.get("app_name", "").lower() == app_name.lower()]
+        if only_one:
+            return app_list[0] if app_list else None
+        return app_list
+
+    async def _search_environments(self, apps: list[dict] | dict | None, stage: str) -> dict[str, dict]:
+        """
+        Search for environments with a name matching the given app_name (case-insensitive).
+
+        Args:
+            apps (list[dict]|dict|None): A list of apps or single app dict to search environments for. If None, returns an empty dict.
+            stage (str): The stage/environment name to match (e.g. "production").
+
+        Returns:
+            dict[str, dict]: A dictionary mapping app IDs to their corresponding environments.
+        """
+        # check for none
+        if apps is None:
+            return {}
+        # check if apps is a single dict
+        if isinstance(apps, dict):
+            apps = [apps]
+        # collect the ids of the given apps
+        app_ids = [app.get("app_id") for app in apps if app.get("app_id", None)]
+        environments: dict[str, dict] = {}
+        # iterate all apps
+        for app_id in app_ids:
+            try:
+                # fetch environments for the current app
+                _response = await self.do_request(
+                    method="GET",
+                    endpoint=self._get_endpoint_list_environments(app_id=app_id),
+                    raise_on_error=True,
+                )
+                _envdata = _response.json()
+                # filter the environments...
+                # Keep only valids...
+                valid_environments = [env for env in _envdata if env.get("project_id", None)]
+                # Keep only those matching the stage...
+                stage_environments = [env for env in valid_environments if env.get("name", "").lower() == stage.lower()]
+                # Keep only those with a deployed variant...
+                deployed_environments = [env for env in stage_environments if env.get("deployed_app_variant_id", None)]
+                # Since stages are unique per app, we can take the first matching environment (if any)
+                if deployed_environments:
+                    environments[app_id] = deployed_environments[0]
+            except Exception as e:
+                self.logging.error(f"Error fetching environments for app_id '{app_id}': {e}")
+        return environments
+
+    ##########################################
     ############## PAYLOADS ##################
     ##########################################
 
-    def _construct_prompt_config_payload(self, id:str, stage:str)-> dict:
-        # since we do only have
+    async def _construct_prompt_config_payload(self, id: str) -> dict:
+        # fetch all apps (=prompts)
+        app = await self._search_apps(app_name=id, only_one=True)
+        if not app:
+            raise ValueError(f"No {self.get_engine_name()} app found with name '{id}' for prompt config fetch.")
 
-    def _get_fetch_prompt_config_payload(
+        # fetch environments for the app and stage
+        environments = await self._search_environments(apps=app, stage=self._stage)
+        if not environments:
+            raise ValueError(f"No {self.get_engine_name()} environments found for app_id '{app['app_id']}' and stage '{self._stage}' for prompt config fetch.")
+
+        # get the environment for our app
+        env = environments.get(app["app_id"], None)
+        if not env:
+            raise ValueError(f"No {self.get_engine_name()} environment found for app_id '{app['app_id']}' and stage '{self._stage}' for prompt config fetch.")
+        # safety check
+        required_params = ["app_id", "project_id", "deployed_app_variant_id"]
+        for r in required_params:
+            if r not in env or not env[r].strip():
+                raise ValueError(f"Missing required {self.get_engine_name()} parameter '{r}' in environment data for app_id '{app['app_id']}'.")
+        return {
+            "variant_id": env["deployed_app_variant_id"],
+            "environment_id": env["project_id"],
+            "application_id": env["app_id"]
+        }
+
+    async def _get_fetch_prompt_config_payload(
         self,
-        app_id: str,
-        variant_id: str | None,
-        environment_id: str | None
+        id: str
     ) -> dict:
-        """Builds the Agenta /variants/configs/fetch request body.
+        # find the right combination of ids
+        ids = await self._construct_prompt_config_payload(id=id)
 
-        Either variant_ref or environment_ref must be provided. If neither is
-        given the Agenta backend defaults to the "production" environment.
-
-        Args:
-            app_id (str): Application ID registered in Agenta.
-            variant_id (str | None): Variant ID; mutually exclusive with environment_id.
-            environment_id (str | None): Environment ID, e.g. "production".
-
-        Returns:
-            dict: JSON-serialisable payload for the fetch endpoint.
-        """
         return {
             "variant_ref": {
                 "slug": "string",
                 "version": 0,
                 "commit_message": "string",
-                "id": variant_id
+                "id": ids["variant_id"]
             },
             "environment_ref": {
                 "slug": "string",
                 "version": 0,
                 "commit_message": "string",
-                "id": environment_id
+                "id": ids["environment_id"]
             },
             "application_ref": {
                 "slug": "string",
                 "version": 0,
                 "commit_message": "string",
-                "id": app_id
+                "id": ids["application_id"]
             }
-            }
+        }
 
     ##########################################
     ########### RESPONSE PARSER ##############
@@ -112,11 +193,15 @@ class PromptClientAgenta(PromptClientInterface):
         response: dict
     ) -> PromptConfig:
         config = response.get("params", {}).get("prompt", {})
+        app_id = response.get("application_ref", {}).get("slug", None)  # we use slug because our search is based on the slug instead of id
+        if not app_id:
+            raise ValueError(f"Missing required app_id in response for prompt config fetch.")
+
         _messages = config.get("messages", [])
         _llmconfig = config.get("llm_config", {})
 
         # create PromptConfigMessage from each message
-        messages:list[PromptConfigMessage] = []
+        messages: list[PromptConfigMessage] = []
         for m in _messages:
             role = m.get("role", "")
             content = m.get("content", "")
@@ -135,52 +220,24 @@ class PromptClientAgenta(PromptClientInterface):
         variables = config.get("input_keys", [])
 
         return PromptConfig(
-            id="",
-            stage="",
+            id=app_id,
+            stage=self._stage,
             messages=messages,
             schema=schema,
             variables=variables
         )
 
-    def _parse_list_apps_response(self, response: list) -> list[AppInfo]:
-        """Parse the Agenta GET /apps response.
+    ##########################################
+    ############## RENDERING #################
+    ##########################################
 
-        Expected response shape: list of app objects with keys
-        "app_id", "app_name", "app_slug" (slug may not always be present).
-
-        Args:
-            response (list): Raw JSON list from GET /apps.
-
-        Returns:
-            list[AppInfo]: Parsed application info list.
-        """
-        return [
-            AppInfo(
-                id=app.get("app_id", ""),
-                name=app.get("app_name", ""),
-                slug=app.get("app_slug"),
-            )
-            for app in (response or [])
-        ]
-
-    def _parse_list_variants_response(self, response: list) -> list[VariantInfo]:
-        """Parse the Agenta GET /apps/:app_id/variants response.
-
-        Expected response shape: list of variant objects with keys
-        "variant_id", "variant_name", "variant_slug", "revision".
-
-        Args:
-            response (list): Raw JSON list from GET /apps/:app_id/variants.
-
-        Returns:
-            list[VariantInfo]: Parsed variant info list.
-        """
-        return [
-            VariantInfo(
-                id=variant.get("variant_id", ""),
-                name=variant.get("variant_name", ""),
-                slug=variant.get("variant_slug"),
-                version=variant.get("revision"),
-            )
-            for variant in (response or [])
-        ]
+    def _render_prompt_sanitized(self, messages: list[PromptConfigMessage], replacements: dict[str, str]) -> list[PromptConfigMessage]:
+        # iterate all messages
+        new_messages: list[PromptConfigMessage] = []
+        for m in messages:
+            template_content = m.content
+            # on agenta, variables are wrapped in {{some_variable}}.
+            for var, value in replacements.items():
+                template_content = template_content.replace(f"{{{{{var}}}}}", value)
+            new_messages.append(PromptConfigMessage(role=m.role, content=template_content))
+        return new_messages
