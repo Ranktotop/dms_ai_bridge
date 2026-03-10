@@ -5,6 +5,9 @@ from shared.clients.prompt.models.Prompt import PromptConfig, PromptConfigMessag
 from shared.helper.HelperConfig import HelperConfig
 from shared.helper.HelperFile import HelperFile
 from datetime import datetime
+import jsonschema
+import json
+import re
 import os
 
 
@@ -105,7 +108,7 @@ class PromptClientInterface(ClientInterface):
             self.logging.warning(f"Failed to write fallback prompt config for id '{prompt_config.id}' and stage '{prompt_config.stage}' to file for engine '{self.get_engine_name()}'.", color="yellow")
             return False
         else:
-            self.logging.info(f"Added prompt config with id '{prompt_config.id}' and stage '{prompt_config.stage}' to fallback configs of engine '{self.get_engine_name()}'.")
+            self.logging.info(f"Added prompt config with id '{prompt_config.id}' and stage '{prompt_config.stage}' to fallback configs of engine '{self.get_engine_name()}'.", color="green")
             # update cache
             self._load_fallback_prompts()
             return True
@@ -334,6 +337,10 @@ class PromptClientInterface(ClientInterface):
             return rendered_messages
 
         # prepare counter
+        full_chars = sum(len(m.content) for m in rendered_messages)
+        if full_chars <= max_chars:
+            return rendered_messages
+        
         current_chars = 0
         truncated_messages = []
         # iterate messages
@@ -353,6 +360,59 @@ class PromptClientInterface(ClientInterface):
                     truncated_messages.append(PromptConfigMessage(role=message.role, content=truncated_content))
                 # after this, we have reached the max chars limit, so we stop processing further messages. We log a warning then
                 self.logging.warning(
-                    f"Rendered prompt with id '{prompt.id}' exceeds the max chars limit of {max_chars} after rendering. The prompt will be truncated to fit the limit, but consider increasing the limit or optimizing your prompt to avoid truncation.", color="yellow")
+                    f"Rendered prompt with id '{prompt.id}' exceeds the max chars limit of {max_chars} (required: {full_chars}, exceeds: {full_chars - max_chars}) after rendering. The prompt will be truncated to fit the limit, but consider increasing the limit or optimizing your prompt to avoid truncation.", color="yellow")
                 break
         return truncated_messages
+
+    def validate_prompt_schema(self, prompt: PromptConfig, llm_response: dict|str) -> dict|None:
+        """
+        Validates an llm_response against the JSON Schema defined in the prompt config.
+
+        The prompt schema follows the structure:
+            { "name": "...", "description": "...", "schema": { <JSON Schema> }, "strict": false }
+
+        Args:
+            prompt (PromptConfig): The prompt configuration containing the schema.
+            llm_response (dict|str): The already-parsed LLM response or json-string to validate
+
+        Returns:
+            dict|None: The parsed LLM response if valid, None otherwise.
+        """        
+        # if the response is a string, we try to parse it as JSON
+        if isinstance(llm_response, str):
+            try:
+                # remove code block markdown often added by llms
+                raw = re.sub(r"```(?:json)?\s*", "", llm_response).strip().rstrip("`")
+                llm_response = json.loads(raw)
+            except json.JSONDecodeError as e:
+                self.logging.warning(
+                    "LLM response is not a valid JSON string for prompt '%s': %s",
+                    prompt.id,
+                    e.msg,
+                    color="yellow",
+                )
+                return None        
+        
+        # if no schema is set or schema is empty, we consider the response valid and return it as is
+        if not prompt.schema or not prompt.schema.get("schema"):
+            return llm_response
+
+        try:
+            jsonschema.validate(instance=llm_response, schema=prompt.schema.get("schema"))
+            return llm_response
+        except jsonschema.ValidationError as e:
+            self.logging.warning(
+                "LLM response failed schema validation for prompt '%s': %s",
+                prompt.id,
+                e.message,
+                color="yellow",
+            )
+            return None
+        except jsonschema.SchemaError as e:
+            self.logging.warning(
+                "Invalid JSON Schema defined in prompt '%s': %s",
+                prompt.id,
+                e.message,
+                color="yellow",
+            )
+            return None

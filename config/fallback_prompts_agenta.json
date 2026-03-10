@@ -1,0 +1,89 @@
+{
+    "prompts": [
+        {
+            "id": "doc_ingestion_extract_metadata",
+            "stage": "production",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "# Metadata-Extractor\nDu bist ein Metadata-Extractor, der Metadaten aus einem Dokumenten-Text extrahiert.\n\n## Aufgabe\nAnalysiere den Dokumenten-Text, der dir gegeben wird und extrahiere die Metadaten aus Sicht von {{company}}:\n\n- **correspondent:** Wenn der Empfänger des Dokuments {{company}} ist, dann ist der Korrespondent der Absender des Dokuments. Ist {{company}} jedoch der Absender, dann ist Korrespondent der Empfänger des Dokuments. Bevorzuge den Firmennamen als Korrespondent. Falls kein Firmenname gefunden werden kann, dann verwende alternativ den Personennamen (ohne Anrede).\n- **document_type:** Der Dokumenten-Typ. Beispielsweise \"Rechnung\", \"Vertrag\", \"Quittung\" etc.\n- **title:** Ein kurzer Titel, der für das Dokument geeignet ist.\n- **year:** Das Jahr als 4-stellige Zahl, an dem das Dokument erstellt wurde.\n- **month:** Der Monat als 2-stellige Zahl, an dem das Dokument erstellt wurde.\n- **day:** Der Tag als 2-stellige Zahl, an dem das Dokument erstellt wurde.\n\n### Kritisch\n- Antworte NUR mit einem validen JSON-Objekt\n- Beginne direkt mit { und ende mit }\n- Kein Markdown, keine Erklärungen außerhalb des JSON\n- Alle extrahierten Werte müssen in der Sprache '{{language}}' sein. Einzige Ausnahme ist das Feld 'correspondent'.\n- Verwende primär Werte aus der mitgegebenen Liste bestehender Werte. Definiere nur neue Werte, wenn die bestehenden Werte keinen Sinn für das Dokument machen.\n\n## Output-Format (strukturiert)\nWICHTIG: Antworte NUR mit einem JSON-Objekt. Kein Markdown, keine Erklärungen drumherum.\n### JSON-Schema (Alle Felder sind Pflichtfelder)\n> {\n>  \"correspondent\": \"Firmen/Personen-Name der Gegenstelle (Empfänger/Sender). Niemals {{company}}\",\n>  \"document_type\": \"Dokumenten-Typ in einem Wort. Beispiel: Rechnung, Vertrag, etc...\",\n>  \"title\": \"Kurzer passender Titel. Beispiel: Leasingvertrag der Tesla AG\",\n>  \"year\": \"Jahr als 4-Stellige Zahl. Beispiel: 2026\",\n>  \"month\": \"Monat als 2-Stellige Zahl. Beispiel: 05\",\n>  \"day\": \"Tag als 2-Stellige Zahl. Beispiel: 31\"\n> }\n\nSei präzise und realitätsnah. Falls eine Information nicht verfügbar ist, setze den Wert auf null. Beispiel: Wenn kein Datum auf dem Dokument ersichtlich ist -> year, month, day -> null\n\n## Bestehende Werte\nNachfolgend erhältst du eine Liste bestehender Werte. Wähle primär aus dieser Liste aus, wenn sie zu dem Dokument passen. Definiere neue, wenn keine der Werte zum Dokument passen.\n\n### Bestehende document_types\n{{existing_document_types}} \n\n### Bestehende correspondents\n{{existing_correspondents}} "
+                },
+                {
+                    "role": "user",
+                    "content": "Extrahiere nun die Metadaten zu diesem Dokumenten-Inhalt und antworte ausschließlich mit dem JSON-Objekt:\n---\n{{document_content}} "
+                }
+            ],
+            "schema": {
+                "name": "Schema",
+                "description": "Extrahierte Metadaten eines Dokuments aus Sicht des verarbeitenden Unternehmens.",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "correspondent": {
+                            "type": [
+                                "string",
+                                "null"
+                            ],
+                            "description": "Der Firmen- oder Personenname der Gegenstelle (Absender oder Empfänger). Niemals der Name des eigenen Unternehmens."
+                        },
+                        "document_type": {
+                            "type": [
+                                "string",
+                                "null"
+                            ],
+                            "description": "Der Typ des Dokuments in einem Wort. Beispiele: Rechnung, Vertrag, Quittung, Mahnung, Angebot."
+                        },
+                        "title": {
+                            "type": [
+                                "string",
+                                "null"
+                            ],
+                            "description": "Ein kurzer, passender Titel für das Dokument. Beispiel: Leasingvertrag der Tesla AG."
+                        },
+                        "year": {
+                            "type": [
+                                "string",
+                                "null"
+                            ],
+                            "description": "Das Erstellungsjahr als 4-stellige Zahl. Beispiel: 2026. Null, wenn nicht erkennbar.",
+                            "pattern": "^[0-9]{4}$"
+                        },
+                        "month": {
+                            "type": [
+                                "string",
+                                "null"
+                            ],
+                            "description": "Der Erstellungsmonat als 2-stellige Zahl. Beispiel: 05. Null, wenn nicht erkennbar.",
+                            "pattern": "^(0[1-9]|1[0-2])$"
+                        },
+                        "day": {
+                            "type": [
+                                "string",
+                                "null"
+                            ],
+                            "description": "Der Erstellungstag als 2-stellige Zahl. Beispiel: 31. Null, wenn nicht erkennbar.",
+                            "pattern": "^(0[1-9]|[12][0-9]|3[01])$"
+                        }
+                    },
+                    "required": [
+                        "correspondent",
+                        "document_type",
+                        "title",
+                        "year",
+                        "month",
+                        "day"
+                    ],
+                    "additionalProperties": false
+                },
+                "strict": false
+            },
+            "variables": [
+                "company",
+                "language",
+                "existing_document_types",
+                "existing_correspondents",
+                "document_content"
+            ]
+        }
+    ]
+}

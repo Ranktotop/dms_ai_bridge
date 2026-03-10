@@ -506,25 +506,25 @@ class HelperFile:
 
     def read_json_file(self, path, asDict: bool = False) -> Union[dict, None]:
         if (not self.file_exist(path=path)):
-            logging.error(f"Die Datei '{path}' wurde nicht gefunden.")
+            logging.debug(f"Die Datei '{path}' wurde nicht gefunden.")
             return None
         path = self._convert_path(path, True)
         try:
             json_content = self.read_text_file(path)
             if json_content is None:
-                logging.error(f"Fehler beim Lesen der Datei '{path}'.")
+                logging.debug(f"Fehler beim Lesen der Datei '{path}'.")
                 return None
             data = json.loads(json_content)
             return data if asDict else json.dumps(data)
         except FileNotFoundError:
-            logging.error(f"Die Datei '{path}' wurde nicht gefunden.")
+            logging.debug(f"Die Datei '{path}' wurde nicht gefunden.")
             return None
         except json.JSONDecodeError:
-            logging.error(
+            logging.debug(
                 f"Fehler beim Dekodieren von JSON in der Datei '{path}'.")
             return None
         except Exception as e:
-            logging.error(f"Ein Fehler ist aufgetreten: {str(e)}")
+            logging.debug(f"Ein Fehler ist aufgetreten: {str(e)}")
             return None
 
     # copy file

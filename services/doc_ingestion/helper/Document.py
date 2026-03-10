@@ -823,17 +823,19 @@ class Document():
         """
         try:
             # get the prompt messages
-            messages = await self._get_prompt_extraction(
+            prompt = await self._get_prompt_extraction(
                 additional_doc_types=additional_doc_types,
                 additional_correspondents=additional_correspondents,
                 additional_tags=additional_tags)
 
             # run the prompt messages through the LLM
-            raw = await self._llm_client.do_chat(messages)
+            raw = await self._llm_client.do_chat(prompt["messages"])
 
-            # parse the response json
-            raw = re.sub(r"```(?:json)?\s*", "", raw).strip().rstrip("`")
-            data = json.loads(raw)
+            # parse and validate the response json
+            data = self._prompt_client.validate_prompt_schema(prompt["config"], raw)
+            if data is None:
+                raise ValueError(f"LLM response did not match expected schema!")
+            
             return DocMetadata(
                 correspondent=data.get("correspondent") or None,
                 document_type=data.get("document_type") or None,
@@ -939,10 +941,20 @@ class Document():
     ##########################################
 
     async def _get_prompt_extraction(self,
-                                     additional_doc_types: list[str] | None = None,
-                                     additional_correspondents: list[str] | None = None,
-                                     additional_tags: list[str] | None = None) -> list[PromptConfigMessage]:
-        """Build the metadata extraction prompt for the chat LLM."""
+        additional_doc_types: list[str] | None = None,
+        additional_correspondents: list[str] | None = None,
+        additional_tags: list[str] | None = None) -> dict[str, any]:
+        """
+        Uses the prompt client to fetch and render the metadata extraction prompt, including existing DMS values as hints.
+
+        Args:
+            additional_doc_types (list[str] | None): Optional list of additional document type strings to include as hints in the prompt.
+            additional_correspondents (list[str] | None): Optional list of additional correspondent strings to include as hints in the prompt.
+            additional_tags (list[str] | None): Optional list of additional tag name strings to include as hints in the prompt.
+
+        Returns:
+            list[dict[str, str]]: List of messages (dicts with "role" and "content") ready to be sent to the chat LLM for metadata extraction.
+        """
         # Read existing values
         doc_types = self._get_from_cache("document_types", additional_doc_types)
         correspondents = self._get_from_cache("correspondents", additional_correspondents)
@@ -959,10 +971,16 @@ class Document():
         }
         # fetch prompt config and render the template
         prompt = await self._prompt_client.do_fetch_prompt(id="doc_ingestion_extract_metadata")
-        return self._prompt_client.render_prompt(
+        messages = self._prompt_client.render_prompt(
             prompt=prompt,
             replacements=replacements,
             max_chars=self._llm_client.get_chat_model_max_chars())
+        # convert to dict and return
+        dict_messages = [{"role": m.role, "content": m.content} for m in messages]
+        return {
+            "config": prompt,
+            "messages": dict_messages
+        }
 
     def _get_prompt_cache(self,
                           additional_doc_types: list[str] | None = None,
