@@ -93,6 +93,10 @@ class Tools:
                                 await emit(chunk, done=False)
                         elif event_type == "answer":
                             answer += chunk
+                        elif event_type == "citation":
+                            citation_data = event.get("data", {})
+                            if __event_emitter__ is not None:
+                                await __event_emitter__({"type": "citation", "data": citation_data})
                         elif event_type is None and chunk.startswith("Error:"):
                             # error event from the bridge — propagate immediately
                             await emit(chunk, done=True)

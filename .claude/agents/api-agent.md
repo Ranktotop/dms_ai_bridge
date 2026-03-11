@@ -51,14 +51,21 @@ Phase IV (custom ReAct agent) is complete. `ChatRouter` is a thin adapter over `
 - `server/user_mapping/models.py` — `UserMapping` Pydantic models
 - `config/user_mapping.yml` — mapping config (path via `USER_MAPPING_FILE` env var)
 
-**Read-only reference (consume via interfaces only):**
+**Read-only reference (consume via interfaces only — NEVER edit these files):**
 - `shared/clients/dms/DMSClientInterface.py` and `DMSClientManager`
 - `shared/clients/rag/RAGClientInterface.py`, `RAGClientManager`, `Point.py` models (`PointHighDetails`, etc.)
 - `shared/clients/llm/LLMClientInterface.py` and `LLMClientManager`
 - `shared/clients/cache/CacheClientInterface.py` and `CacheClientManager`
 - `services/dms_rag_sync/SyncService.py` — only `do_incremental_sync(document_id, engine)`
 - `services/rag_search/SearchService.py` — only `do_search(query, owner_id, limit, chat_history)`
+- `services/agent/AgentService.py` — only `AgentService.do_run()` and `AgentResponse`
+- `services/agent/tools/AgentToolResult.py` — only `CitationRef` (read the type, never edit)
 - `shared/helper/HelperConfig.py` and `shared/logging/logging_setup.py`
+
+**STRICT BOUNDARY — files api-agent must NEVER edit:**
+- Anything under `services/agent/` — owned exclusively by agent-agent
+- Anything under `services/dms_rag_sync/` or `services/rag_search/` — owned by service-agent
+- Anything under `shared/clients/` — owned by the respective client agent
 
 ## User Identity & Mapping
 
@@ -144,6 +151,17 @@ class SearchResponse(BaseModel):
     query: str
     results: list[SearchResultItem]
     total: int
+
+class CitationItem(BaseModel):
+    dms_doc_id: str
+    dms_engine: str
+    title: str | None = None
+    url: str | None = None
+
+class ChatResponse(BaseModel):
+    query: str
+    answer: str
+    citations: list[CitationItem] = []
 ```
 
 ## Coding Conventions

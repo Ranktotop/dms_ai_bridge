@@ -18,6 +18,14 @@ class SearchResponse(BaseModel):
     total: int
 
 
+class CitationItem(BaseModel):
+    dms_doc_id: str
+    dms_engine: str
+    title: str | None = None
+    url: str | None = None
+
+
 class ChatResponse(BaseModel):
     query: str
     answer: str
+    citations: list[CitationItem] = []

@@ -1,5 +1,6 @@
 """Tool: fetch full metadata and content for a specific document."""
 from services.agent.tools.AgentToolInterface import AgentToolInterface
+from services.agent.tools.AgentToolResult import AgentToolResult, CitationRef
 from services.rag_search.helper.IdentityHelper import IdentityHelper
 from shared.clients.rag.models.Point import PointHighDetails
 from shared.clients.llm.LLMClientInterface import LLMClientInterface
@@ -33,7 +34,7 @@ class AgentToolGetDocumentDetails(AgentToolInterface):
     ############### CORE #####################
     ##########################################
 
-    async def do_execute(self, **kwargs) -> str:
+    async def do_execute(self, **kwargs) -> AgentToolResult:
         """
         Retrieve a specific document from all rag engines, by documents_id
 
@@ -42,7 +43,7 @@ class AgentToolGetDocumentDetails(AgentToolInterface):
             document_id (str): The id of the document to search for
 
         Returns:
-            str: A formatted string listing the matching documents with their titles and content previews.
+            AgentToolResult: Formatted document details and a CitationRef for the retrieved document.
 
         Raises:
             ValueError: If the document_id or identity is not given
@@ -58,7 +59,7 @@ class AgentToolGetDocumentDetails(AgentToolInterface):
 
             #define limit in chars based on client/server (the min value is used!)
             llm_limit = min(client_llm_max_chars, self.get_chat_model_max_chars())
-            
+
             identities = identity_helper.get_identities()
             chunks: list[PointHighDetails] = []
             # iterate the owner on each dms engine
@@ -73,10 +74,22 @@ class AgentToolGetDocumentDetails(AgentToolInterface):
 
             # if no documents found, the owner either has no access or the doc_id is not correct
             if not chunks:
-                return "Document with ID '%s' not found or owner has no access to it." % document_id
+                return AgentToolResult(
+                    observation="Document with ID '%s' not found or owner has no access to it." % document_id,
+                    citations=[],
+                )
 
             # Since all points are leading to same document (=has same meta), we can pick the first point only
-            return chunks[0].get_as_prompt_details(max_chars=llm_limit)
+            first = chunks[0]
+            observation = first.get_as_prompt_details(max_chars=llm_limit)
+            citations: list[CitationRef] = []
+            if first.dms_doc_id and first.dms_engine:
+                citations.append(CitationRef(
+                    dms_doc_id=first.dms_doc_id,
+                    dms_engine=first.dms_engine,
+                    title=first.title,
+                ))
+            return AgentToolResult(observation=observation, citations=citations)
         except Exception as e:
             self.logging.error("AgentToolGetDocumentDetails: Error while retrieving document infos: %s", str(e), color="red")
-            return "Error while retrieving document infos."
+            return AgentToolResult(observation="Error while retrieving document infos.", citations=[])

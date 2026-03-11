@@ -1,5 +1,6 @@
 """Tool: search documents by semantic similarity."""
 from services.agent.tools.AgentToolInterface import AgentToolInterface
+from services.agent.tools.AgentToolResult import AgentToolResult, CitationRef
 from services.rag_search.helper.IdentityHelper import IdentityHelper
 from shared.clients.rag.models.Point import PointHighDetails
 from shared.clients.llm.LLMClientInterface import LLMClientInterface
@@ -33,7 +34,7 @@ class AgentToolSearchDocuments(AgentToolInterface):
     ############### CORE #####################
     ##########################################
 
-    async def do_execute(self, **kwargs) -> str:
+    async def do_execute(self, **kwargs) -> AgentToolResult:
         """
         Retrieve documents matching the query from SearchService and return a formatted string with titles and content previews.
 
@@ -42,7 +43,7 @@ class AgentToolSearchDocuments(AgentToolInterface):
             query (str): Natural language query string to search for.
 
         Returns:
-            str: A formatted string listing the matching documents with their titles and content previews or error message on errors
+            AgentToolResult: Observation text with formatted document results and one CitationRef per unique document found.
         """
         try:
             # make sure all required vars are set
@@ -63,16 +64,31 @@ class AgentToolSearchDocuments(AgentToolInterface):
                 limit=limit,
             )
             if not results:
-                return "No documents found matching the query or owner has no access to them."
+                return AgentToolResult(
+                    observation="No documents found matching the query or owner has no access to them.",
+                    citations=[],
+                )
 
             # Merge results by doc id
             merged = self._merge_chunks_by_document_id(results)
             # Calculate chars per result
             chars_per_result = llm_limit // len(merged) if merged else llm_limit
-            return "\n\n".join(d.get_as_prompt_search_result(max_chars=chars_per_result) for d in merged)
+            observation = "\n\n".join(d.get_as_prompt_search_result(max_chars=chars_per_result) for d in merged)
+
+            # Build one CitationRef per unique document (already deduplicated by merge)
+            citations: list[CitationRef] = [
+                CitationRef(
+                    dms_doc_id=d.dms_doc_id or "",
+                    dms_engine=d.dms_engine or "",
+                    title=d.title,
+                )
+                for d in merged
+                if d.dms_doc_id and d.dms_engine
+            ]
+            return AgentToolResult(observation=observation, citations=citations)
         except Exception as e:
             self.logging.error("AgentToolSearchDocuments: Error while searching for documents: %s", str(e), color="red")
-            return "Error while searching for documents."
+            return AgentToolResult(observation="Error while searching for documents.", citations=[])
 
 
     ##########################################

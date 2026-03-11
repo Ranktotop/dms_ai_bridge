@@ -9,12 +9,14 @@ from shared.helper.HelperConfig import HelperConfig
 from services.rag_search.SearchService import SearchService
 from services.rag_search.helper.IdentityHelper import IdentityHelper
 from services.agent.tools.AgentToolManager import AgentToolManager
+from services.agent.tools.AgentToolResult import AgentToolResult, CitationRef
 
 
 @dataclass
 class AgentResponse:
     answer: str
     tool_calls: list[str] = field(default_factory=list)
+    citations: list[CitationRef] = field(default_factory=list)
 
 
 class AgentService:
@@ -82,8 +84,8 @@ class AgentService:
         query: str,
         chat_history: list[dict] | None = None,
         max_iterations: int = 5,
-        step_callback: Callable[[str], Awaitable[None]] | None = None,        
-        identity_helper: IdentityHelper|None = None,
+        step_callback: Callable[[str], Awaitable[None]] | None = None,
+        identity_helper: IdentityHelper | None = None,
         client_settings: dict | None = None
     ) -> AgentResponse:
         """Run the ReAct loop for a query.
@@ -94,11 +96,11 @@ class AgentService:
             max_iterations (int): Maximum number of tool-call iterations.
             step_callback (Callable[[str], Awaitable[None]] | None): Optional async callable invoked before each tool call and
                 before the final answer, to enable real-time streaming of agent progress.
-            identity_helper (IdentityHelper|None): Optional resolved user identities for filtering.
+            identity_helper (IdentityHelper | None): Optional resolved user identities for filtering.
             client_settings (dict | None): Optional settings from the client, e.g. to pass to tools.
 
         Returns:
-            AgentResponse with the final answer and list of tool calls made.
+            AgentResponse with the final answer, list of tool calls made, and collected citations.
         """
         # create the instruction prompt for the llm to know which tools it can use, and how to use them
         messages: list[dict] = [{"role": "system", "content": self._get_system_prompt()}]
@@ -111,6 +113,8 @@ class AgentService:
         messages.append({"role": "user", "content": query})
 
         tool_calls_made: list[str] = []
+        collected_citations: list[CitationRef] = []
+        seen_citations: set[tuple[str, str]] = set()
         llm_output = ""
 
         for iteration in range(max_iterations):
@@ -131,7 +135,7 @@ class AgentService:
                 # Inform user that we will answer now
                 if step_callback:
                     await step_callback("✍️ Erstelle Antwort...")
-                return AgentResponse(answer=answer, tool_calls=tool_calls_made)
+                return AgentResponse(answer=answer, tool_calls=tool_calls_made, citations=collected_citations)
 
             # Now try to fetch the Action and Input for the next tool call
             action_match = re.search(r"Action:\s*(\w+)", llm_output, re.IGNORECASE)
@@ -145,60 +149,74 @@ class AgentService:
                 )
                 if step_callback:
                     await step_callback("✍️ Erstelle Antwort...")
-                return AgentResponse(answer=llm_output.strip(), tool_calls=tool_calls_made)
+                return AgentResponse(answer=llm_output.strip(), tool_calls=tool_calls_made, citations=collected_citations)
 
             # collect name of the tool and its input
             tool_name = action_match.group(1).strip()
             tool_input_raw = input_match.group(1).strip() if input_match else ""
 
             # run the tool
-            tool_response = await self._run_agent_tool(
-                tool_name=tool_name, 
-                tool_input_raw=tool_input_raw, 
-                identity_helper=identity_helper, 
+            tool_result = await self._run_agent_tool(
+                tool_name=tool_name,
+                tool_input_raw=tool_input_raw,
+                identity_helper=identity_helper,
                 step_callback=step_callback,
-                client_settings=client_settings)
+                client_settings=client_settings,
+            )
 
-            # track the call
+            # track the call and deduplicate citations by (dms_doc_id, dms_engine)
             tool_calls_made.append(tool_name)
-            self.logging.debug("Tool '%s' returned: %s", tool_name, tool_response[:200])
+            for ref in tool_result.citations:
+                key = (ref.dms_doc_id, ref.dms_engine)
+                if key not in seen_citations:
+                    seen_citations.add(key)
+                    collected_citations.append(ref)
+            self.logging.debug("Tool '%s' returned: %s", tool_name, tool_result.observation[:200])
 
             # add agent responses to context
             messages.append({"role": "assistant", "content": llm_output})
-            messages.append({"role": "user", "content": "Observation: %s" % tool_response})
+            messages.append({"role": "user", "content": "Observation: %s" % tool_result.observation})
 
         self.logging.warning(
             "AgentService: max iterations (%d) reached, using last output as answer",
             max_iterations,
         )
-        return AgentResponse(answer=llm_output.strip(), tool_calls=tool_calls_made)
+        return AgentResponse(answer=llm_output.strip(), tool_calls=tool_calls_made, citations=collected_citations)
 
     ##########################################
     ############# HELPERS ####################
     ##########################################
         
 
-    async def _run_agent_tool(self, tool_name: str, tool_input_raw: str, identity_helper: IdentityHelper|None = None, step_callback: Callable[[str], Awaitable[None]] | None = None, client_settings: dict | None = None) -> str:
-        """
-        Runs the tool by given name with the arguments passed.
-        Automatically parses the input as JSON if possible, to allow passing multiple arguments in a structured way.
+    async def _run_agent_tool(
+        self,
+        tool_name: str,
+        tool_input_raw: str,
+        identity_helper: IdentityHelper | None = None,
+        step_callback: Callable[[str], Awaitable[None]] | None = None,
+        client_settings: dict | None = None,
+    ) -> AgentToolResult:
+        """Run the tool by the given name with the arguments passed.
+
+        Automatically parses the input as JSON if possible, to allow passing multiple
+        arguments in a structured way.
 
         Args:
             tool_name (str): Name of the tool to run, as specified in the Action field.
-            tool_input_raw (str): The raw string from the Action Input field, which may be a simple query or a JSON object for multiple arguments.
-            identity_helper (IdentityHelper|None): Optional resolved user identities for filtering, passed to the tool's do_execute method.
-            step_callback (Callable[[str], Awaitable[None]] | None): Optional async callable invoked before each tool call and
-                before the final answer, to enable real-time streaming of agent progress.
-            client_settings (dict | None): Optional settings from the client, passed to the tool's do_execute method.
+            tool_input_raw (str): The raw string from the Action Input field, which may be
+                a simple query or a JSON object for multiple arguments.
+            identity_helper (IdentityHelper | None): Optional resolved user identities for
+                filtering, passed to the tool's do_execute method.
+            step_callback (Callable[[str], Awaitable[None]] | None): Optional async callable
+                invoked before each tool call and before the final answer.
+            client_settings (dict | None): Optional settings from the client, passed to the
+                tool's do_execute method.
 
         Returns:
-            The Tools response as string
-
-        Raises:
-            Exception: If the tool execution fails, the exception is logged and re-raised.
+            AgentToolResult with observation text and any citations produced by the tool.
         """
         tool = self._tool_manager.get_tool_by_name(tool_name)
-        
+
         # Inform the user, what we will do next
         if step_callback:
             await step_callback(tool.get_step_hint())
@@ -208,8 +226,8 @@ class AgentService:
             kwargs = {
                 "query": tool_input_raw,
                 "identity": identity_helper,
-                "client_settings": client_settings
-                }
+                "client_settings": client_settings,
+            }
             try:
                 parsed = json.loads(tool_input_raw)
                 #If we received a dict, add each key-value pair in the parsed dict to kwargs. The parsed keys do have priority over the default ones we set before, so they can override them if needed (e.g. to pass separate query)
@@ -226,4 +244,4 @@ class AgentService:
             return await tool.do_execute(**kwargs)
         except Exception as e:
             self.logging.error("Tool '%s' raised exception: %s", tool_name, e, color="red")
-            raise e
+            return AgentToolResult(observation="Error executing tool '%s': %s" % (tool_name, str(e)), citations=[])

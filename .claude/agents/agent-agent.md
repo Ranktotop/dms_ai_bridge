@@ -33,11 +33,13 @@ not know about HTTP requests or responses.
 
 **Primary ownership:**
 - `services/agent/AgentService.py` — ReAct loop orchestrator
+- `services/agent/tools/AgentToolResult.py` — `CitationRef` + `AgentToolResult` dataclasses (shared citation model)
 - `services/agent/tools/AgentToolInterface.py` — abstract tool base ABC
 - `services/agent/tools/AgentToolManager.py` — tool registry + descriptions builder
 - `services/agent/tools/search_documents/AgentToolSearchDocuments.py`
 - `services/agent/tools/list_filter_options/AgentToolListFilterOptions.py`
 - `services/agent/tools/get_document_details/AgentToolGetDocumentDetails.py`
+- `services/agent/tools/get_document_full/AgentToolGetDocumentFull.py`
 
 **Read-only reference (consume via interfaces only):**
 - `services/rag_search/SearchService.py` — `do_search()`, `do_fetch_by_doc_id()` (called by tools)
@@ -72,9 +74,16 @@ LLMClientInterface.do_chat(messages)
 
 ```python
 @dataclass
+class CitationRef:           # from AgentToolResult.py
+    dms_doc_id: str
+    dms_engine: str
+    title: str | None = None
+
+@dataclass
 class AgentResponse:
     answer: str
-    tool_calls: list[str]
+    tool_calls: list[str] = field(default_factory=list)
+    citations: list[CitationRef] = field(default_factory=list)
 
 class AgentService:
     async def do_run(
@@ -111,7 +120,7 @@ class AgentToolInterface(ABC):
         identity: IdentityHelper | None = None,
         client_settings: dict | None = None,
         **kwargs,
-    ) -> str: ...
+    ) -> AgentToolResult: ...  # never return str — always AgentToolResult
 ```
 
 ### AgentToolManager
@@ -143,8 +152,8 @@ Follow all conventions in CLAUDE.md. Additional rules for this agent:
 - No FastAPI, Starlette, or Pydantic HTTP response model imports in `services/agent/`
 - System prompt only via `_get_system_prompt()` getter — never as a module-level constant
 - `step_callback` is always optional — guard every call with `if step_callback:`
-- Tool errors: catch exceptions inside `do_execute()`, log them, return a user-friendly
-  error string — never re-raise out of `do_execute()`
+- Tool errors: catch exceptions inside `do_execute()`, log them, return
+  `AgentToolResult(observation="...", citations=[])` — never re-raise, never return plain `str`
 - `do_run()` signature is a stable API contract — notify api-agent before any change
 - Logging: always %-style, never f-strings
 

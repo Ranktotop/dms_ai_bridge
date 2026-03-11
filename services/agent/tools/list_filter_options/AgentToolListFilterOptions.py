@@ -2,6 +2,7 @@
 import json
 
 from services.agent.tools.AgentToolInterface import AgentToolInterface
+from services.agent.tools.AgentToolResult import AgentToolResult
 from services.rag_search.helper.IdentityHelper import IdentityHelper
 from shared.clients.llm.LLMClientInterface import LLMClientInterface
 from shared.helper.HelperConfig import HelperConfig
@@ -34,13 +35,13 @@ class AgentToolListFilterOptions(AgentToolInterface):
     ############### CORE #####################
     ##########################################
 
-    async def do_execute(self, **kwargs) -> str:
+    async def do_execute(self, **kwargs) -> AgentToolResult:
         """
         Fetches all correspondents, document types and tags from the cache for the resolved identities and returns them as a JSON string.
         This is used to provide available filter options for the agent when searching for documents.
 
         Returns:
-            str: A JSON string containing the available filter options or an error message on errors
+            AgentToolResult: JSON string containing the available filter options (no citations, as no documents are accessed).
         """
         try:
             # make sure all required vars are set
@@ -48,7 +49,7 @@ class AgentToolListFilterOptions(AgentToolInterface):
 
             identities = identity_helper.get_identities()
             result: dict[str, list[str]] = {}
-            
+
             # iterate the owner on each dms engine
             for identity in identities:
                 #fetch the cache data for the dms engine and owner id (gets filled automatically if not already filled)
@@ -76,7 +77,7 @@ class AgentToolListFilterOptions(AgentToolInterface):
                     result["tags"].extend(
                         v for v in cache_data.tags if v not in result["tags"]
                     )
-            return json.dumps(result, ensure_ascii=False)
+            return AgentToolResult(observation=json.dumps(result, ensure_ascii=False), citations=[])
         except Exception as e:
             self.logging.error("AgentToolListFilterOptions: Error while building filter options: %s", str(e), color="red")
-            return "Error while building filter options."
+            return AgentToolResult(observation="Error while building filter options.", citations=[])

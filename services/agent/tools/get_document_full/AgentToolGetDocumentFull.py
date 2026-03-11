@@ -1,5 +1,6 @@
 """Tool: fetch full metadata and content for a specific document."""
 from services.agent.tools.AgentToolInterface import AgentToolInterface
+from services.agent.tools.AgentToolResult import AgentToolResult, CitationRef
 from services.rag_search.helper.IdentityHelper import IdentityHelper
 from shared.clients.llm.LLMClientInterface import LLMClientInterface
 from shared.helper.HelperConfig import HelperConfig
@@ -36,7 +37,7 @@ class AgentToolGetDocumentFull(AgentToolInterface):
     ############### CORE #####################
     ##########################################
 
-    async def do_execute(self, **kwargs) -> str:
+    async def do_execute(self, **kwargs) -> AgentToolResult:
         """
         Retrieve a specific document from all rag engines, by documents_id
 
@@ -45,7 +46,7 @@ class AgentToolGetDocumentFull(AgentToolInterface):
             document_id (str): The id of the document to search for
 
         Returns:
-            str: A formatted string listing the matching documents with their titles and content previews.
+            AgentToolResult: Paginated full document content and one CitationRef per unique (dms_doc_id, dms_engine) accessed.
 
         Raises:
             ValueError: If the document_id or identity is not given
@@ -62,9 +63,11 @@ class AgentToolGetDocumentFull(AgentToolInterface):
 
             #define limit in chars based on client/server (the min value is used!)
             llm_limit = min(client_llm_max_chars, self.get_chat_model_max_chars())
-            
+
             identities = identity_helper.get_identities()
             contents: list[str] = []
+            seen_citation_keys: set[tuple[str, str]] = set()
+            citations: list[CitationRef] = []
             # iterate the owner on each dms engine
             for identity in identities:
                 # fetch all chunks for the document from rag system, if it matches the owner id and dms_engine
@@ -73,13 +76,24 @@ class AgentToolGetDocumentFull(AgentToolInterface):
                     dms_engine=identity.dms_engine,
                     owner_id=identity.owner_id,
                 )
-                #if there are results, add them to the content list
+                #if there are results, add them to the content list and track citation
                 if found:
                     contents.extend(found)
+                    key = (document_id, identity.dms_engine)
+                    if key not in seen_citation_keys:
+                        seen_citation_keys.add(key)
+                        citations.append(CitationRef(
+                            dms_doc_id=document_id,
+                            dms_engine=identity.dms_engine,
+                            title=None,
+                        ))
 
             # if no documents found, the owner either has no access or the doc_id is not correct
             if not contents:
-                return "Document with ID '%s' not found or owner has no access to it." % document_id
+                return AgentToolResult(
+                    observation="Document with ID '%s' not found or owner has no access to it." % document_id,
+                    citations=[],
+                )
 
             # Build full content string — concatenate multiple engine results with markdown headers
             if len(contents) == 1:
@@ -103,7 +117,7 @@ class AgentToolGetDocumentFull(AgentToolInterface):
                 ) % (start_char, end_char, total_length, end_char)
                 page = full_content[start_char:end_char - len(note)] + note
 
-            return page
+            return AgentToolResult(observation=page, citations=citations)
         except Exception as e:
             self.logging.error("AgentToolGetDocumentFull: Error while retrieving document content: %s", str(e), color="red")
-            return "Error while retrieving document content."
+            return AgentToolResult(observation="Error while retrieving document content.", citations=[])

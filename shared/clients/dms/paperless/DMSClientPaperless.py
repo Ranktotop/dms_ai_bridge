@@ -33,8 +33,8 @@ class DMSClientPaperless(DMSClientInterface):
     def _get_engine_name(self) -> str:
         return "Paperless"
     
-    def get_document_view_url(self, document_id):
-        return self._get_base_url().rstrip("/") + f"/documents/{document_id}/details"
+    def get_document_view_url(self, document_id: str) -> str:
+        return "%s/documents/%s/details" % (self._get_base_url().rstrip("/"), document_id)
     
     ################ CONFIG ##################
     def _get_required_config(self) -> list[EnvConfig]:

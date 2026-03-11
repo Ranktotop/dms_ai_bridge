@@ -56,6 +56,7 @@ module.exports.runtime = {
           const decoder = new TextDecoder();
           let answer = "";
           let buffer = "";
+          const citations = [];
 
           while (true) {
             const { done, value } = await reader.read();
@@ -77,6 +78,9 @@ module.exports.runtime = {
                   this.introspect(`${callerId}: ${parsed.chunk}`);
                 } else if (parsed.type === "answer") {
                   answer += parsed.chunk;
+                } else if (parsed.type === "citation") {
+                  const name = parsed.data?.source?.name || parsed.data?.metadata?.[0]?.source || "";
+                  if (name && !citations.includes(name)) citations.push(name);
                 }
               } catch (_) {
                 // ignore malformed events
@@ -85,7 +89,11 @@ module.exports.runtime = {
           }
 
           if (answer.trim()) {
-            return answer.trim();
+            let result = answer.trim();
+            if (citations.length > 0) {
+              result += "\n\n**Sources:**\n" + citations.map((c, i) => `${i + 1}. ${c}`).join("\n");
+            }
+            return result;
           }
         }
         this.logger(`Stream endpoint returned status ${response.status}, falling back.`);

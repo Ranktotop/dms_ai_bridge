@@ -579,11 +579,13 @@ changing search/ranking logic in `SearchService`.
 
 **Owns:**
 - `services/agent/AgentService.py` — ReAct loop orchestrator
+- `services/agent/tools/AgentToolResult.py` — `CitationRef` + `AgentToolResult` dataclasses
 - `services/agent/tools/AgentToolInterface.py` — abstract tool base ABC
 - `services/agent/tools/AgentToolManager.py` — tool registry + descriptions builder
 - `services/agent/tools/search_documents/AgentToolSearchDocuments.py`
 - `services/agent/tools/list_filter_options/AgentToolListFilterOptions.py`
 - `services/agent/tools/get_document_details/AgentToolGetDocumentDetails.py`
+- `services/agent/tools/get_document_full/AgentToolGetDocumentFull.py`
 
 **Invoke when:**
 modifying the ReAct loop, adding or changing a tool, changing the step_callback
@@ -593,17 +595,21 @@ mechanism, updating the system prompt, or adjusting how tool errors are handled.
 - No FastAPI imports in `services/agent/` — keep the subsystem framework-agnostic
 - System prompt only via `_get_system_prompt()` getter — never as a module-level constant
 - `step_callback` is optional — always guard with `if step_callback:` before calling
-- Tool errors: log the exception, return a user-friendly error string from `do_execute()` —
-  never re-raise out of `do_execute()`
+- Tool errors: log the exception, return `AgentToolResult(observation="...", citations=[])` —
+  never re-raise out of `do_execute()`, never return plain `str`
+- `do_execute()` return type is always `AgentToolResult` — never `str`
 - New tool: create `services/agent/tools/{tool_name}/AgentTool{Name}.py`, inherit
   `AgentToolInterface`, implement `do_execute()` and `get_step_hint()`, register in
   `AgentToolManager`
 
 **Key contracts:**
+- `AgentResponse` has fields: `answer: str`, `tool_calls: list[str]`, `citations: list[CitationRef]`
 - `AgentService.do_run(query, chat_history, max_iterations, step_callback, identity_helper, client_settings) -> AgentResponse`
-  — consumed by api-agent's `ChatRouter`
+  — consumed by api-agent's `ChatRouter`; never change this signature without notifying api-agent
 - Tools read `SearchService.do_search()` and `SearchService.do_fetch_by_doc_id()` —
   coordinate signature changes with service-agent
+
+**Strict boundary — api-agent must NEVER edit files under `services/agent/`.**
 
 ---
 

@@ -12,13 +12,48 @@ from fastapi.responses import StreamingResponse
 from server.dependencies.auth import verify_api_key
 from server.dependencies.services import get_agent_service, get_user_mapping_service, get_dms_clients
 from server.models.requests import SearchRequest
-from server.models.responses import ChatResponse
+from server.models.responses import ChatResponse, CitationItem
 from server.user_mapping.UserMappingService import UserMappingService
 from services.agent.AgentService import AgentService
+from services.agent.tools.AgentToolResult import CitationRef
 from shared.clients.dms.DMSClientInterface import DMSClientInterface
 from services.rag_search.helper.IdentityHelper import IdentityHelper
 
 router = APIRouter(prefix="/chat", tags=["chat"], dependencies=[Depends(verify_api_key)])
+
+
+def _resolve_citations(
+    citations: list[CitationRef],
+    dms_clients: list[DMSClientInterface],
+) -> list[CitationItem]:
+    """Resolve a list of CitationRef objects into CitationItem responses.
+
+    For each citation, the matching DMS client is found by engine name and used
+    to generate the document view URL. If no matching client is found, url is None.
+
+    Args:
+        citations: Citation references collected from agent tool results.
+        dms_clients: Available DMS clients used to generate document URLs.
+
+    Returns:
+        List of CitationItem Pydantic models ready for the API response.
+    """
+    items: list[CitationItem] = []
+    for ref in citations:
+        url: str | None = None
+        for client in dms_clients:
+            if client.get_engine_name() == ref.dms_engine:
+                url = client.get_document_view_url(ref.dms_doc_id)
+                break
+        items.append(
+            CitationItem(
+                dms_doc_id=ref.dms_doc_id,
+                dms_engine=ref.dms_engine,
+                title=ref.title,
+                url=url,
+            )
+        )
+    return items
 
 
 @router.post("/{frontend}")
@@ -69,9 +104,10 @@ async def chat_documents(
         max_iterations=5,
         step_callback=None,
         identity_helper=identity_helper,
-        client_settings=client_settings
+        client_settings=client_settings,
     )
-    return ChatResponse(query=body.query, answer=agent_response.answer)
+    citations = _resolve_citations(agent_response.citations, dms_clients)
+    return ChatResponse(query=body.query, answer=agent_response.answer, citations=citations)
 
 
 @router.post("/{frontend}/stream")
@@ -131,6 +167,16 @@ async def chat_documents_stream(
                     step_callback=step_callback,
                     client_settings=client_settings,
                 )
+                citations = _resolve_citations(agent_response.citations, dms_clients)
+                for citation in citations:
+                    await queue.put("data: %s\n\n" % json.dumps({
+                        "type": "citation",
+                        "data": {
+                            "document": [citation.url or citation.dms_doc_id],
+                            "metadata": [{"source": citation.url or citation.dms_doc_id}],
+                            "source": {"name": citation.title or citation.dms_doc_id},
+                        },
+                    }))
                 for word in agent_response.answer.split(" "):
                     await queue.put("data: %s\n\n" % json.dumps({"type": "answer", "chunk": word + " "}))
                 await queue.put("data: %s\n\n" % json.dumps({"type": "step", "chunk": "✅ Fertig"}))

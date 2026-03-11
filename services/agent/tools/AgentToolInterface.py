@@ -1,6 +1,7 @@
 """Abstract base class for agent tools."""
 from abc import ABC, abstractmethod
 
+from services.agent.tools.AgentToolResult import AgentToolResult
 from services.rag_search.SearchService import SearchService
 from services.rag_search.helper.IdentityHelper import IdentityHelper
 from shared.clients.llm.LLMClientInterface import LLMClientInterface
@@ -44,14 +45,14 @@ class AgentToolInterface(ABC):
     ##########################################
 
     @abstractmethod
-    async def do_execute(self, **kwargs) -> str:
-        """Execute the tool and return the observation string.
+    async def do_execute(self, **kwargs) -> AgentToolResult:
+        """Execute the tool and return an AgentToolResult with the observation and citations.
 
         Args:
             **kwargs: Tool-specific arguments parsed from the Action Input.
             client_settings (dict|None): Optional settings from the client, e.g. to pass to tools.
 
         Returns:
-            str: Observation text passed back into the ReAct loop.
+            AgentToolResult: Observation text and any document citations produced by this tool call.
         """
         pass
