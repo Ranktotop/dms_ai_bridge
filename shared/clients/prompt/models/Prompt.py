@@ -6,6 +6,11 @@ class PromptConfigMessage:
     role: str
     content: str
 
+    def to_llm_message_dict(self):
+        return {
+            "role": self.role,
+            "content": self.content,
+        }
 
 @dataclass
 class PromptConfig:

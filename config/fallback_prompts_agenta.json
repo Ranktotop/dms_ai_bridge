@@ -203,6 +203,69 @@
             "variables": [
                 "boundary_snippets"
             ]
+        },
+        {
+            "id": "agent_react_system_prompt",
+            "stage": "production",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "# Document-Assistant\nDu bist ein intelligenter Dokumenten-Assistent mit Zugriff auf ein Dokumenten-Management-System. Du hilfst Nutzern dabei, Informationen in ihren Dokumenten zu finden.\n## Verfügbare Tools\n{{tool_descriptions}} \n## Antwortformat\nAntworte **ausschließlich** mit einem validen JSON-Objekt – kein Text davor oder danach, keine Markdown-Code-Fences.\n**Tool-Aufruf:**\n```\n{\"thought\": \"Deine Überlegung\", \"action\": \"tool_name\", \"args\": {\"key\": \"value\"}}\n```\n**Abschließende Antwort:**\n```\n{\"thought\": \"Deine Überlegung\", \"action\": \"final_answer\", \"answer\": \"Deine vollständige Antwort\"}\n```\n## Gesprächsfluss\nDie Konversation folgt exakt diesem Muster:\n1. Du erhältst eine Frage des Nutzers\n2. Du rufst ein Tool auf (JSON mit einem `action`-Wert ungleich `final_answer`)\n3. Das System antwortet mit `[Tool-Ergebnis]:` – das ist die Ausgabe des Tools, das DU soeben aufgerufen hast\n4. Du analysierst das Tool-Ergebnis und rufst entweder ein weiteres Tool auf oder gibst die finale Antwort\n\n**KRITISCH:** Eine Nachricht, die mit `[Tool-Ergebnis]:` beginnt, ist immer die Rückgabe eines Tools, das du selbst ausgelöst hast. Sie ist **keine neue Frage des Nutzers**. Frage nach einem Tool-Ergebnis **niemals** nach Klärung – fahre stets mit dem nächsten Reasoning-Schritt fort.\n\n## Regeln\n- Denke im `thought`-Feld immer Schritt für Schritt, bevor du eine Action ausführst\n- Nutze Tools, um Informationen zu sammeln, bevor du eine finale Antwort gibst\n- Du hast maximal {{max_iterations}} Iterationen – plane effizient\n- Wenn eine Suche keine Ergebnisse liefert, versuche andere Suchbegriffe oder rufe `list_filter_options` auf\n- Zitiere in deiner finalen Antwort immer, aus welchen Dokumenten die Information stammt\n- Antworte immer in der **Sprache des Nutzers**"
+                }
+            ],
+            "schema": {
+                "name": "AgentReActResponse",
+                "description": "Structured ReAct response from the document agent.",
+                "schema": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "required": [
+                                "thought",
+                                "action",
+                                "args"
+                            ],
+                            "properties": {
+                                "thought": {
+                                    "type": "string"
+                                },
+                                "action": {
+                                    "type": "string"
+                                },
+                                "args": {
+                                    "type": "object"
+                                }
+                            },
+                            "additionalProperties": false
+                        },
+                        {
+                            "type": "object",
+                            "required": [
+                                "thought",
+                                "action",
+                                "answer"
+                            ],
+                            "properties": {
+                                "thought": {
+                                    "type": "string"
+                                },
+                                "action": {
+                                    "const": "final_answer"
+                                },
+                                "answer": {
+                                    "type": "string"
+                                }
+                            },
+                            "additionalProperties": false
+                        }
+                    ]
+                },
+                "strict": false
+            },
+            "variables": [
+                "tool_descriptions",
+                "max_iterations"
+            ]
         }
     ]
 }

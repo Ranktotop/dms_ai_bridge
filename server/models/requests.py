@@ -31,3 +31,11 @@ class ToolDocumentFullRequest(BaseModel):
     user_id: str
     document_id: str
     start_char: int = 0
+
+
+class ChatRequest(BaseModel):
+    user_id: str
+    query: str
+    chat_history: list[dict] = []
+    max_iterations: int = 6
+    tool_context: dict = {}  # passed verbatim to every tool call; overrides LLM-generated args on conflict

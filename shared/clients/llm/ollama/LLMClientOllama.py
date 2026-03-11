@@ -62,6 +62,10 @@ class LLMClientOllama(LLMClientInterface):
     def get_model_details_payload(self) -> dict:
         return {"name": self.embed_model}
 
+    def get_chat_model_details_payload(self) -> dict:
+        # fall back to embed_model if no dedicated chat model is configured
+        return {"name": self.chat_model or self.embed_model}
+
     ##########################################
     ########### RESPONSE PARSER ##############
     ##########################################
@@ -72,6 +76,14 @@ class LLMClientOllama(LLMClientInterface):
             if key.endswith(".embedding_length"):
                 return int(value)
         raise ValueError("Could not determine embedding vector size for model '%s'" % self.embed_model)
+
+    def _parse_endpoint_model_context_length(self, model_info: dict) -> int:
+        # Ollama reports context size under a key like "llama.context_length" inside model_info
+        info: dict = model_info.get("model_info", {})
+        for key, value in info.items():
+            if key.endswith(".context_length"):
+                return int(value)
+        raise ValueError("Could not determine context length from Ollama model_info. Keys: %s" % list(info.keys()))
 
     def _parse_endpoint_embedding(self, response_data: dict) -> list[list[float]]:
         embeddings = response_data.get("embeddings")
@@ -84,10 +96,29 @@ class LLMClientOllama(LLMClientInterface):
 
     def _parse_endpoint_chat(self, response_data: dict) -> str:
         message = response_data.get("message", {})
-        content = message.get("content")
-        if content is None:
-            raise ValueError(
-                "Ollama chat response does not contain a valid message. "
-                "Response keys: %s" % list(response_data.keys())
-            )
-        return content
+        content = message.get("content", "")
+
+        # Standard case: model replied with text in content
+        if content:
+            return content
+
+        # Fallback: model used native tool-calling (content empty, tool_calls populated).
+        # Synthesise a ReAct-compatible JSON string so AgentResponseParser can handle it.
+        tool_calls = message.get("tool_calls")
+        if tool_calls:
+            first = tool_calls[0]
+            fn = first.get("function", {})
+            action = fn.get("name", "")
+            args = fn.get("arguments", {})
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except json.JSONDecodeError:
+                    args = {}
+            thought = message.get("thinking", "")
+            return json.dumps({"thought": thought, "action": action, "args": args}, ensure_ascii=False)
+
+        raise ValueError(
+            "Ollama chat response contains neither content nor tool_calls. "
+            "Response keys: %s" % list(response_data.keys())
+        )

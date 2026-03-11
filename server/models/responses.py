@@ -55,3 +55,17 @@ class ToolDocumentFullResponse(BaseModel):
     content: str
     total_length: int
     next_start_char: int | None
+
+
+class CitationItem(BaseModel):
+    dms_doc_id: str
+    dms_engine: str
+    title: str | None = None
+    view_url: str | None = None
+
+
+class ChatResponse(BaseModel):
+    query: str
+    answer: str
+    citations: list[CitationItem]
+    tool_calls: list[str]

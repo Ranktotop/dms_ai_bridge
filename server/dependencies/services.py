@@ -1,6 +1,7 @@
 from fastapi import Request
 
 from server.user_mapping.UserMappingService import UserMappingService
+from services.agent.AgentService import AgentService
 from services.dms_rag_sync.SyncService import SyncService
 from services.rag_search.SearchService import SearchService
 from shared.clients.dms.DMSClientInterface import DMSClientInterface
@@ -35,3 +36,7 @@ def get_helper_config(request: Request) -> HelperConfig:
 
 def get_user_mapping_service(request: Request) -> UserMappingService:
     return request.app.state.user_mapping_service
+
+
+def get_agent_service(request: Request) -> AgentService:
+    return request.app.state.agent_service

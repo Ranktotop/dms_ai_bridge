@@ -3,8 +3,8 @@
   "hubId": "dms-bridge-skill",
   "name": "DMS Document Tools",
   "schema": "skill-1.0.0",
-  "version": "3.0.0",
-  "description": "Provides tool access to the personal document archive via dms_ai_bridge. Select the appropriate action and supply the matching parameters. Actions: search_documents (requires: query), list_filter_options (no extra params), get_document_details (requires: document_id), get_document_full (requires: document_id; optional: start_char).",
+  "version": "4.0.0",
+  "description": "Answers questions about the user's personal document archive. Always use action=\"chat\" and pass the user's question as query. The bridge runs the full research loop and returns the answer directly — no further tool calls needed.",
   "author": "dms_ai_bridge",
   "license": "MIT",
   "setup_args": {
@@ -52,43 +52,35 @@
   "examples": [
     {
       "prompt": "Search my documents for invoices from last year",
-      "call": "{\"action\": \"search_documents\", \"query\": \"invoices from last year\"}"
+      "call": "{\"action\": \"chat\", \"query\": \"invoices from last year\"}"
     },
     {
-      "prompt": "What correspondents and document types do I have?",
-      "call": "{\"action\": \"list_filter_options\"}"
+      "prompt": "Summarise the Tesla lease agreement for me",
+      "call": "{\"action\": \"chat\", \"query\": \"Summarise the Tesla lease agreement\"}"
     },
     {
-      "prompt": "Show me the details of document 42",
-      "call": "{\"action\": \"get_document_details\", \"document_id\": \"42\"}"
+      "prompt": "Who is the correspondent on document 42?",
+      "call": "{\"action\": \"chat\", \"query\": \"Who is the correspondent on document 42?\"}"
     },
     {
-      "prompt": "Read the full text of document 42",
-      "call": "{\"action\": \"get_document_full\", \"document_id\": \"42\", \"start_char\": 0}"
+      "prompt": "What document types do I have in my archive?",
+      "call": "{\"action\": \"chat\", \"query\": \"What document types do I have in my archive?\"}"
     },
     {
-      "prompt": "Continue reading document 42",
-      "call": "{\"action\": \"get_document_full\", \"document_id\": \"42\", \"start_char\": 4000}"
+      "prompt": "Find all contracts from 2023",
+      "call": "{\"action\": \"chat\", \"query\": \"Find all contracts from 2023\"}"
     }
   ],
   "entrypoint": {
     "file": "handler.js",
     "params": {
       "action": {
-        "description": "Tool action to perform: search_documents | list_filter_options | get_document_details | get_document_full",
+        "description": "Always use \"chat\". The bridge handles all research internally.",
         "type": "string"
       },
       "query": {
-        "description": "Natural language search query — required for search_documents",
+        "description": "The user's question or request in natural language — required.",
         "type": "string"
-      },
-      "document_id": {
-        "description": "DMS document ID from search results — required for get_document_details and get_document_full",
-        "type": "string"
-      },
-      "start_char": {
-        "description": "Character offset to start reading from — optional, for get_document_full pagination (default: 0)",
-        "type": "number"
       }
     }
   },

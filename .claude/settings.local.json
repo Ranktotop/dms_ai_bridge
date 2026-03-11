@@ -31,7 +31,27 @@
       "WebFetch(domain:cloud.agenta.ai)",
       "WebFetch(domain:eu.cloud.agenta.ai)",
       "Bash(mkdir -p /home/marcmeese/dms_ai_bridge/shared/clients/prompt/models /home/marcmeese/dms_ai_bridge/shared/clients/prompt/agenta && touch /home/marcmeese/dms_ai_bridge/shared/clients/prompt/__init__.py /home/marcmeese/dms_ai_bridge/shared/clients/prompt/models/__init__.py /home/marcmeese/dms_ai_bridge/shared/clients/prompt/agenta/__init__.py)",
-      "WebFetch(domain:docs.anythingllm.com)"
+      "WebFetch(domain:docs.anythingllm.com)",
+      "WebFetch(domain:docs.useanything.com)",
+      "WebFetch(domain:deepwiki.com)",
+      "WebFetch(domain:cookbook.openai.com)",
+      "WebFetch(domain:developers.openai.com)",
+      "WebFetch(domain:docs.ollama.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:api.github.com)",
+      "Bash(sleep 5 && curl -s \"https://raw.githubusercontent.com/mintplex-labs/anything-llm/refs/heads/main/server/utils/agents/imported.js\" | head -200)",
+      "Bash(curl -s \"https://api.github.com/repos/mintplex-labs/anything-llm/git/trees/main?recursive=1\" | python3 -c \"import json,sys; tree=json.load\\(sys.stdin\\); [print\\(i['path']\\) for i in tree['tree'] if 'agent' in i['path'].lower\\(\\) or 'skill' in i['path'].lower\\(\\)]\" 2>&1 | head -80)",
+      "Bash(curl -s \"https://api.github.com/repos/mintplex-labs/anything-llm/git/trees/main?recursive=1\" | python3 -c \"import json,sys; data=json.load\\(sys.stdin\\); print\\(list\\(data.keys\\(\\)\\)\\)\")",
+      "Bash(curl -s \"https://api.github.com/repos/mintplex-labs/anything-llm/git/trees/main?recursive=1\" | python3 -c \"import json,sys; data=json.load\\(sys.stdin\\); print\\(data['message']\\)\")",
+      "Bash(curl -s \"https://api.github.com/repos/mintplex-labs/anything-llm/branches\" | python3 -c \"import json,sys; data=json.load\\(sys.stdin\\); [print\\(b['name']\\) for b in data]\" 2>&1 | head -10)",
+      "Bash(curl -s \"https://api.github.com/repos/mintplex-labs/anything-llm/branches\" | python3 -c \"import json,sys; data=json.load\\(sys.stdin\\); [print\\(b['name']\\) for b in data]\" 2>&1 | grep -i \"master\\\\|main\\\\|dev\\\\|develop\\\\|release\" | head -10)",
+      "Bash(curl -s \"https://api.github.com/repos/mintplex-labs/anything-llm\" | python3 -c \"import json,sys; data=json.load\\(sys.stdin\\); print\\(data.get\\('default_branch', 'N/A'\\)\\)\")",
+      "Bash(curl -s \"https://api.github.com/repos/mintplex-labs/anything-llm/git/trees/master?recursive=1\" | python3 -c \"import json,sys; data=json.load\\(sys.stdin\\); [print\\(i['path']\\) for i in data.get\\('tree',[]\\) if 'agent' in i['path'].lower\\(\\) or 'skill' in i['path'].lower\\(\\)]\" 2>&1 | head -80)",
+      "Bash(curl -s \"https://api.github.com/repos/mintplex-labs/anything-llm/git/trees/master?recursive=1\" | python3 -c \"import json,sys; data=json.load\\(sys.stdin\\); [print\\(i['path']\\) for i in data.get\\('tree',[]\\) if 'agent' in i['path'].lower\\(\\) or 'skill' in i['path'].lower\\(\\)]\" 2>&1 | grep -v \"^frontend\" | head -80)",
+      "Bash(curl -s \"https://api.github.com/repos/mintplex-labs/anything-llm/git/trees/master?recursive=1\" | python3 -c \"import json,sys; data=json.load\\(sys.stdin\\); [print\\(i['path']\\) for i in data.get\\('tree',[]\\) if 'agent' in i['path'].lower\\(\\) or 'skill' in i['path'].lower\\(\\)]\" 2>&1 | grep -v \"^frontend\" | tail -60)",
+      "Bash(curl -s \"https://raw.githubusercontent.com/mintplex-labs/anything-llm/master/server/utils/agents/imported.js\")",
+      "Bash(curl -s \"https://raw.githubusercontent.com/mintplex-labs/anything-llm/master/server/utils/agents/aibitat/index.js\")",
+      "Bash(curl -s \"https://raw.githubusercontent.com/mintplex-labs/anything-llm/master/server/utils/agents/index.js\" | grep -n \"citation\\\\|sources\\\\|source\\\\|introspect\\\\|observation\\\\|result\\\\|handler\\\\|skill\" | head -50)"
     ]
   }
 }

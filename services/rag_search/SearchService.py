@@ -250,7 +250,7 @@ class SearchService:
                 )
                 continue
             #skip empty results
-            if doc.content:
+            if doc and doc.content:
                 results.append(doc)
         return results
 

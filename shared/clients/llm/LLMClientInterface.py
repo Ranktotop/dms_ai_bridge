@@ -13,16 +13,47 @@ class LLMClientInterface(ClientInterface):
         # embedding config
         self.embed_distance = helper_config.get_string_val(f"{self.get_client_type().upper()}_DISTANCE", default="Cosine")
         self.embed_model = helper_config.get_string_val(f"{self.get_client_type().upper()}_MODEL_EMBEDDING")
-        self.embed_model_max_chars = helper_config.get_number_val(f"{self.get_client_type().upper()}_MODEL_EMBEDDING_MAX_CHARS")
+        # env value is the fallback; do_healthcheck() overwrites this with the actual limit from the backend
+        self._embed_model_max_chars_fallback: int = helper_config.get_number_val(f"{self.get_client_type().upper()}_MODEL_EMBEDDING_MAX_CHARS")
+        self.embed_model_max_chars: int = self._embed_model_max_chars_fallback
 
         # chat / completion config
         self.chat_model = helper_config.get_string_val(f"{self.get_client_type().upper()}_MODEL_CHAT")
-        self.chat_model_max_chars = helper_config.get_number_val(f"{self.get_client_type().upper()}_MODEL_CHAT_MAX_CHARS")
+        # env value is the fallback; do_healthcheck() overwrites this with the actual limit from the backend
+        self._chat_model_max_chars_fallback: int = helper_config.get_number_val(f"{self.get_client_type().upper()}_MODEL_CHAT_MAX_CHARS")
+        self.chat_model_max_chars: int = self._chat_model_max_chars_fallback
         self.vision_model = helper_config.get_string_val(f"{self.get_client_type().upper()}_MODEL_VISION")
+
+        # guard so the context-window fetch runs only once, even if healthcheck is called repeatedly
+        self._max_chars_initialized: bool = False
 
     ##########################################
     ############### CHECKER ##################
     ##########################################
+
+    async def do_healthcheck(self) -> bool:
+        """Run the standard healthcheck and then fetch context window sizes once.
+
+        The fetch is guarded by _max_chars_initialized so it runs exactly once,
+        no matter how often healthcheck is called (e.g. repeated /health/deep polls).
+        Falls back to the env-configured values silently if the backend is unreachable.
+        """
+        result = await super().do_healthcheck()
+        if not self._max_chars_initialized:
+            self._max_chars_initialized = True
+            if not result:
+                # backend unreachable — no point attempting the fetch, go straight to env fallbacks
+                self.chat_model_max_chars = self._chat_model_max_chars_fallback
+                self.embed_model_max_chars = self._embed_model_max_chars_fallback
+                self.logging.warning(
+                    "Healthcheck failed — using env fallback values for chat_model_max_chars (%d) and embed_model_max_chars (%d).",
+                    self.chat_model_max_chars,
+                    self.embed_model_max_chars,
+                )
+            else:
+                await self.do_fetch_chat_model_max_chars()
+                await self.do_fetch_embed_model_max_chars()
+        return result
 
     ##########################################
     ################ GETTER ##################
@@ -101,8 +132,16 @@ class LLMClientInterface(ClientInterface):
 
     @abstractmethod
     def get_model_details_payload(self) -> dict:
+        """Build the backend-specific request body for an embed model details request.
+
+        Returns:
+            dict: JSON-serialisable request body (e.g. {"name": "..."}).
         """
-        Build the backend-specific request body for a model details request.
+        pass
+
+    @abstractmethod
+    def get_chat_model_details_payload(self) -> dict:
+        """Build the backend-specific request body for a chat model details request.
 
         Returns:
             dict: JSON-serialisable request body (e.g. {"name": "..."}).
@@ -122,6 +161,18 @@ class LLMClientInterface(ClientInterface):
 
         Returns:
             int: The dimension of the embedding vectors produced by the model.
+        """
+        pass
+
+    @abstractmethod
+    def _parse_endpoint_model_context_length(self, model_info: dict) -> int:
+        """Extract the context window size in tokens from a model details response.
+
+        Args:
+            model_info (dict): The raw response from the model details endpoint.
+
+        Returns:
+            int: The context window size in tokens.
         """
         pass
 
@@ -160,6 +211,74 @@ class LLMClientInterface(ClientInterface):
     async def do_fetch_models(self) -> httpx.Response:
         """Fetch the list of available models from the backend."""
         return await self.do_request(method="GET", endpoint=self._get_endpoint_models())
+
+    async def do_fetch_chat_model_max_chars(self) -> int:
+        """Fetch the chat model's context window from the backend and store it as a char limit.
+
+        Converts tokens to chars using a conservative factor of 3 — safe for German text.
+        Falls back to the env-configured value if the API call fails or returns no data.
+
+        Returns:
+            int: The resolved char limit, either from the API or the env fallback.
+        """
+        try:
+            response = await self.do_request(
+                method="POST",
+                json=self.get_chat_model_details_payload(),
+                endpoint=self.get_endpoint_model_details(),
+                raise_on_error=True,
+            )
+            tokens = self._parse_endpoint_model_context_length(model_info=response.json())
+            # multiply by 3 — conservative token-to-char ratio that stays well within the window for German text
+            self.chat_model_max_chars = int(tokens * 3)
+            self.logging.info(
+                "Chat model context window: %d tokens → %d chars stored in chat_model_max_chars.",
+                tokens,
+                self.chat_model_max_chars,
+            )
+        except Exception as e:
+            # fetch failed — fall back to the env-configured value so the service stays functional
+            self.chat_model_max_chars = self._chat_model_max_chars_fallback
+            self.logging.warning(
+                "Could not fetch chat model context window — falling back to env value of %d chars. Error: %s",
+                self.chat_model_max_chars,
+                str(e),
+            )
+        return self.chat_model_max_chars
+
+    async def do_fetch_embed_model_max_chars(self) -> int:
+        """Fetch the embedding model's context window from the backend and store it as a char limit.
+
+        Converts tokens to chars using a conservative factor of 3 — safe for German text.
+        Falls back to the env-configured value if the API call fails or returns no data.
+
+        Returns:
+            int: The resolved char limit, either from the API or the env fallback.
+        """
+        try:
+            response = await self.do_request(
+                method="POST",
+                json=self.get_model_details_payload(),
+                endpoint=self.get_endpoint_model_details(),
+                raise_on_error=True,
+            )
+            tokens = self._parse_endpoint_model_context_length(model_info=response.json())
+            # multiply by 3 — conservative token-to-char ratio that stays well within the window for German text
+            self.embed_model_max_chars = int(tokens * 3)
+            self.logging.info(
+                "Embedding model context window: %d tokens → %d chars stored in embed_model_max_chars.",
+                tokens,
+                self.embed_model_max_chars,
+            )
+        except Exception as e:
+            # fetch failed — fall back to the env-configured value so the service stays functional
+            self.embed_model_max_chars = self._embed_model_max_chars_fallback
+            self.logging.warning(
+                "Could not fetch embedding model context window — falling back to env value of %d chars. Error: %s",
+                self.embed_model_max_chars,
+                str(e),
+            )
+        return self.embed_model_max_chars
 
     async def do_fetch_embedding_vector_size(self) -> Tuple[int, str]:
         """Fetch the output vector dimension and distance metric of the configured embedding model.

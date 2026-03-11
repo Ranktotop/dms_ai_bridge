@@ -29,6 +29,8 @@ from server.routers.WebhookRouter import router as webhook_router
 from server.routers.QueryRouter import router as query_router
 from server.routers.ToolsRouter import router as tools_router
 from server.user_mapping.UserMappingService import UserMappingService
+from services.agent.AgentService import AgentService
+from server.routers.ChatRouter import router as chat_router
 
 logging = setup_logging()
 app_version = os.getenv("APP_VERSION", "unknown")
@@ -82,6 +84,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         dms_clients=dms_clients
     )
     app.state.user_mapping_service = UserMappingService()
+    app.state.agent_service = AgentService(
+        helper_config=app.state.helper_config,
+        search_service=app.state.search_service,
+        llm_client=llm_client,
+        prompt_client=prompt_client,
+    )
     logging.info("All services loaded successfully.", color="green")
 
     # while the app is running...
@@ -119,6 +127,7 @@ app.include_router(health_router)
 app.include_router(webhook_router)
 app.include_router(query_router)
 app.include_router(tools_router)
+app.include_router(chat_router)
 
 
 async def check_connections(

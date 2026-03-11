@@ -231,7 +231,7 @@ async def tool_get_document_full(
             full_content += doc.content or ""
             delimiter = f"\n\n"            
     total_length = len(full_content)
-    page_size = 4000
+    page_size = 1000
     end_char = body.start_char + page_size
     page = full_content[body.start_char:end_char]
     next_start_char = end_char if end_char < total_length else None
