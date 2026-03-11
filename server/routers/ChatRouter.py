@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -28,6 +29,7 @@ from services.rag_search.SearchService import SearchService
 from server.dependencies.identity import get_verified_identity_helper
 
 router = APIRouter(prefix="/chat", tags=["chat"], dependencies=[Depends(verify_api_key)])
+logger = logging.getLogger(__name__)
 
 
 ##########################################
@@ -116,6 +118,7 @@ async def chat(
             frontend, body.user_id, user_mapping_service, dms_clients
         )
     except Exception as e:
+        logger.warning("403 on /chat/%s — user_id=%r not mapped: %s", frontend, body.user_id, e)
         raise HTTPException(status_code=403, detail=str(e))
 
     result: AgentResponse = await agent_service.do_run(
@@ -168,6 +171,7 @@ async def chat_stream(
             frontend, body.user_id, user_mapping_service, dms_clients
         )
     except Exception as e:
+        logger.warning("403 on /chat/%s — user_id=%r not mapped: %s", frontend, body.user_id, e)
         raise HTTPException(status_code=403, detail=str(e))
 
     return StreamingResponse(

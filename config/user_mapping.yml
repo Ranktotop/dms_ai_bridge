@@ -14,7 +14,7 @@
 
 users:
   "openwebui":
-    "1":
+    "someemail@example.com":
       paperless: 3
   "anythingllm":
     "1":

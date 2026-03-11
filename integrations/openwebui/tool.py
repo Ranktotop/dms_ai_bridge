@@ -1,35 +1,35 @@
 """
-DMS AI Bridge — OpenWebUI Tool
+title: DMS AI Bridge
+author: Marc Meese
+version: 1.0.0
 
-Deploy this file in OpenWebUI under Admin → Tools.
-Attach the tool set to any model. The model decides which tool to call and when.
+DMS AI Bridge — OpenWebUI Pipe Function
+
+Deploy this file in OpenWebUI under Admin → Functions.
+The bridge runs the full ReAct reasoning loop internally; this pipe only
+streams the results back to OpenWebUI and returns the final answer verbatim.
+Citations are surfaced as native OpenWebUI source chips.
 
 Self-contained: no imports from dms_ai_bridge.
-
-Tools exposed:
-  search_documents       — semantic search, returns merged results
-  list_filter_options    — correspondents, document types, tags
-  get_document_details   — metadata + content preview for a specific document
-  get_document_full      — paginated full text of a specific document
 """
 import json
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
-class Tools:
+class Pipe:
     class Valves(BaseModel):
-        BASE_URL: str = "http://dms-bridge:8000"
-        API_KEY: str = ""
-        LIMIT: int = 5
-        TIMEOUT: float = 60.0
+        BASE_URL: str = Field(default="http://dms-bridge:8000", description="Base URL of the DMS AI Bridge server.")
+        API_KEY: str = Field(default="", description="Authentication key (X-Api-Key header).")
+        LIMIT: int = Field(default=10, description="Maximum number of documents to retrieve per search.")
+        TIMEOUT: float = Field(default=120.0, description="Request timeout in seconds.")
 
     def __init__(self) -> None:
         self.valves = self.Valves()
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
+    ##########################################
+    ############# HELPERS ####################
+    ##########################################
 
     def _headers(self) -> dict:
         return {"Content-Type": "application/json", "X-Api-Key": self.valves.API_KEY}
@@ -37,176 +37,149 @@ class Tools:
     def _base(self) -> str:
         return self.valves.BASE_URL.rstrip("/")
 
-    async def _post(self, path: str, body: dict) -> dict:
-        async with httpx.AsyncClient(timeout=self.valves.TIMEOUT) as client:
-            response = await client.post(
-                "%s%s" % (self._base(), path),
-                json=body,
-                headers=self._headers(),
-            )
-            response.raise_for_status()
-            return response.json()
-
-    async def _emit(self, emitter, description: str, done: bool) -> None:
+    async def _emit_status(self, emitter, description: str, done: bool) -> None:
+        """Forward a progress update to the OpenWebUI status indicator."""
         if emitter is not None:
             await emitter({"type": "status", "data": {"description": description, "done": done}})
 
-    # ------------------------------------------------------------------
-    # Tools
-    # ------------------------------------------------------------------
+    async def _emit_citation(self, emitter, title: str, url: str | None) -> None:
+        """Emit a native OpenWebUI citation chip for a source document."""
+        if emitter is None:
+            return
+        await emitter({
+            "type": "citation",
+            "data": {
+                # document and metadata are parallel lists — one entry per source
+                "document": [title],
+                "metadata": [{"source": url or ""}],
+                "source": {"name": title},
+            },
+        })
 
-    async def search_documents(
+    ##########################################
+    ############### CORE #####################
+    ##########################################
+
+    async def pipe(
         self,
-        query: str,
+        body: dict,
         __user__: dict = {},
         __event_emitter__=None,
     ) -> str:
-        """Search the personal document archive by semantic similarity.
+        """Main entry point called by OpenWebUI on every user message.
 
-        Use this tool whenever the user asks about documents, invoices, contracts,
-        letters, receipts, or any files stored in the document management system.
+        Delegates the full ReAct reasoning loop to the DMS AI Bridge.
+        The return value is displayed verbatim — no second LLM pass occurs
+        inside OpenWebUI, so citations appended here are always visible.
 
         Args:
-            query: Natural language search query.
+            body:             OpenWebUI request body (contains 'messages').
+            __user__:         Injected user dict from OpenWebUI.
+            __event_emitter__: Injected event emitter for status/citation events.
 
         Returns:
-            str: Matching documents with title, metadata, and content preview.
+            The agent's final answer, or an error string on failure.
         """
-        await self._emit(__event_emitter__, "🔍 Suche nach Dokumenten…", done=False)
+        messages: list[dict] = body.get("messages", [])
+        if not messages:
+            return "Error: no messages provided."
+
+        # the last user message is the current query — everything before is history
+        query = messages[-1].get("content", "").strip()
+        if not query:
+            return "Error: empty query."
+
+        # use email as user identifier — easier to configure in user_mapping.yml than an opaque UUID
+        user_id = str(__user__.get("email", ""))
+
+        # strip the current query from history so the bridge doesn't see it twice
+        chat_history = [
+            {"role": m.get("role", "user"), "content": m.get("content", "")}
+            for m in messages[:-1]
+        ]
+
+        await self._emit_status(__event_emitter__, "🚀 Starte DMS AI Agent…", done=False)
+
+        url = "%s/chat/openwebui/stream" % self._base()
+        body_payload = {
+            "user_id": user_id,
+            "query": query,
+            "tool_context": {"limit": self.valves.LIMIT},
+            "chat_history": chat_history,
+        }
+
         try:
-            data = await self._post(
-                "/tools/openwebui/search_documents",
-                {"user_id": __user__.get("id", ""), "query": query, "limit": self.valves.LIMIT},
-            )
-            results = data.get("results", [])
-            if not results:
-                await self._emit(__event_emitter__, "Keine Treffer.", done=True)
-                return "No documents found for: %s" % query
-
-            lines = []
-            for r in results:
-                lines.append("## %s (ID: %s, Score: %.3f)" % (r.get("title", "?"), r.get("dms_doc_id", "?"), r.get("score", 0)))
-                if r.get("created"):
-                    lines.append("Date: %s" % r["created"])
-                if r.get("correspondent"):
-                    lines.append("Correspondent: %s" % r["correspondent"])
-                if r.get("document_type"):
-                    lines.append("Type: %s" % r["document_type"])
-                if r.get("tags"):
-                    lines.append("Tags: %s" % ", ".join(r["tags"]))
-                if r.get("content"):
-                    lines.append("\n%s" % r["content"][:2000])
-                lines.append("")
-
-            await self._emit(__event_emitter__, "Fertig (%d Treffer)" % len(results), done=True)
-            return "\n".join(lines)
+            async with httpx.AsyncClient(timeout=self.valves.TIMEOUT) as client:
+                async with client.stream("POST", url, json=body_payload, headers=self._headers()) as response:
+                    response.raise_for_status()
+                    return await self._consume_stream(response, __event_emitter__)
+        except httpx.HTTPStatusError as e:
+            await self._emit_status(__event_emitter__, "Fehler: HTTP %d" % e.response.status_code, done=True)
+            return "Error: bridge returned HTTP %d." % e.response.status_code
         except Exception as e:
-            await self._emit(__event_emitter__, "Fehler: %s" % str(e), done=True)
-            return "Error searching documents: %s" % str(e)
+            await self._emit_status(__event_emitter__, "Fehler: %s" % str(e), done=True)
+            return "Error communicating with DMS bridge: %s" % str(e)
 
-    async def list_filter_options(
-        self,
-        __user__: dict = {},
-        __event_emitter__=None,
-    ) -> str:
-        """List available filter options: correspondents, document types, and tags.
+    async def _consume_stream(self, response: httpx.Response, emitter) -> str:
+        """Read the SSE stream from the bridge and dispatch each typed event.
 
-        Call this before searching when the user mentions a name or term that could
-        match multiple correspondents or document types. Use the results to clarify.
-
-        Returns:
-            str: JSON-formatted filter options.
-        """
-        await self._emit(__event_emitter__, "🗂️ Lade Filter-Optionen…", done=False)
-        try:
-            data = await self._post(
-                "/tools/openwebui/list_filter_options",
-                {"user_id": __user__.get("id", "")},
-            )
-            await self._emit(__event_emitter__, "Filter geladen.", done=True)
-            return json.dumps(data, ensure_ascii=False, indent=2)
-        except Exception as e:
-            await self._emit(__event_emitter__, "Fehler: %s" % str(e), done=True)
-            return "Error fetching filter options: %s" % str(e)
-
-    async def get_document_details(
-        self,
-        document_id: str,
-        __user__: dict = {},
-        __event_emitter__=None,
-    ) -> str:
-        """Get metadata and content preview for a specific document by its ID.
-
-        Use this after search_documents to retrieve full details for a document
-        the user wants to know more about.
+        Thought/step/retry events are forwarded as OpenWebUI status updates.
+        The answer event emits native citation chips and returns the final text.
 
         Args:
-            document_id: The DMS document ID (from search results).
+            response: Active httpx streaming response from the bridge.
+            emitter:  OpenWebUI's __event_emitter__ callable, or None.
 
         Returns:
-            str: Document metadata and content.
+            The final answer string, or an empty string if no answer event arrived.
         """
-        await self._emit(__event_emitter__, "📄 Lade Dokumentdetails…", done=False)
-        try:
-            data = await self._post(
-                "/tools/openwebui/get_document_details",
-                {"user_id": __user__.get("id", ""), "document_id": document_id},
-            )
-            lines = [
-                "## %s (ID: %s)" % (data.get("title", "?"), data.get("dms_doc_id", "?")),
-            ]
-            if data.get("created"):
-                lines.append("Date: %s" % data["created"])
-            if data.get("correspondent"):
-                lines.append("Correspondent: %s" % data["correspondent"])
-            if data.get("document_type"):
-                lines.append("Type: %s" % data["document_type"])
-            if data.get("tags"):
-                lines.append("Tags: %s" % ", ".join(data["tags"]))
-            if data.get("content"):
-                lines.append("\n%s" % data["content"])
-            await self._emit(__event_emitter__, "Fertig.", done=True)
-            return "\n".join(lines)
-        except Exception as e:
-            await self._emit(__event_emitter__, "Fehler: %s" % str(e), done=True)
-            return "Error fetching document details: %s" % str(e)
+        answer = ""
+        buffer = ""
 
-    async def get_document_full(
-        self,
-        document_id: str,
-        start_char: int = 0,
-        __user__: dict = {},
-        __event_emitter__=None,
-    ) -> str:
-        """Get the full text content of a document with pagination.
+        async for chunk in response.aiter_text():
+            buffer += chunk
 
-        Use this to read the complete text of a document. For long documents,
-        call again with the returned next_start_char to read the next page.
+            # process every complete SSE line that has accumulated in the buffer
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
+                line = line.strip()
+                if not line.startswith("data:"):
+                    continue
 
-        Args:
-            document_id: The DMS document ID.
-            start_char: Character offset to start from (default: 0).
+                payload = line[len("data:"):].strip()
+                if payload == "[DONE]":
+                    return answer
 
-        Returns:
-            str: Document text page with pagination info if truncated.
-        """
-        await self._emit(__event_emitter__, "📄 Lade vollständigen Text…", done=False)
-        try:
-            data = await self._post(
-                "/tools/openwebui/get_document_full",
-                {"user_id": __user__.get("id", ""), "document_id": document_id, "start_char": start_char},
-            )
-            content = data.get("content", "")
-            total = data.get("total_length", 0)
-            next_char = data.get("next_start_char")
+                try:
+                    event = json.loads(payload)
+                except json.JSONDecodeError:
+                    # skip malformed SSE lines rather than crashing
+                    continue
 
-            result = content
-            if next_char is not None:
-                result += "\n\n[Document truncated. %d of %d chars shown. Call again with start_char=%d for more.]" % (
-                    start_char + len(content), total, next_char
-                )
-            await self._emit(__event_emitter__, "Fertig.", done=True)
-            return result
-        except Exception as e:
-            await self._emit(__event_emitter__, "Fehler: %s" % str(e), done=True)
-            return "Error fetching document: %s" % str(e)
+                event_type = event.get("type", "")
+
+                if event_type == "thought":
+                    await self._emit_status(emitter, "💭 %s" % event.get("thought", ""), done=False)
+
+                elif event_type == "step":
+                    hint = event.get("hint") or ("⚙️ %s…" % event.get("tool_name", "tool"))
+                    await self._emit_status(emitter, hint, done=False)
+
+                elif event_type == "retry":
+                    await self._emit_status(emitter, "🔄 Wiederhole Antwort-Parsing…", done=False)
+
+                elif event_type == "answer":
+                    answer = event.get("text", "")
+                    # emit each source as a native OpenWebUI citation chip
+                    for citation in event.get("citations", []):
+                        await self._emit_citation(
+                            emitter,
+                            title=citation.get("title") or citation.get("dms_doc_id", ""),
+                            url=citation.get("view_url"),
+                        )
+                    await self._emit_status(emitter, "✅ Suche abgeschlossen.", done=True)
+
+                elif event_type == "error":
+                    raise RuntimeError(event.get("message", "Agent returned an error."))
+
+        return answer
