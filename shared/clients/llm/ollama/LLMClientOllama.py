@@ -51,33 +51,14 @@ class LLMClientOllama(LLMClientInterface):
     def _get_endpoint_chat(self) -> str:
         return "/api/chat"
 
-    ################ PAYLOAD BUILDER ##################
+    ################ PAYLOADS ##################
     def get_embed_payload(self, texts: list[str]) -> dict:
-        """Build the Ollama embedding request body.
-
-        Args:
-            texts (list[str]): The texts to embed.
-
-        Returns:
-            dict: {"model": "...", "input": [...]}
-        """
         return {"model": self.embed_model, "input": texts}
 
     def get_chat_payload(self, messages: list[dict]) -> dict:
-        """Build the Ollama chat request body.
-
-        Uses chat_model if configured, falls back to embed_model.
-
-        Args:
-            messages (list[dict]): OpenAI-format messages.
-
-        Returns:
-            dict: {"model": "...", "messages": [...], "stream": False}
-        """
         model = self.chat_model or self.embed_model
         return {"model": model, "messages": messages, "stream": False}
-
-    ################ PAYLOAD BUILDER ##################
+    
     def get_model_details_payload(self) -> dict:
         return {"name": self.embed_model}
 
@@ -93,17 +74,6 @@ class LLMClientOllama(LLMClientInterface):
         raise ValueError("Could not determine embedding vector size for model '%s'" % self.embed_model)
 
     def _parse_endpoint_embedding(self, response_data: dict) -> list[list[float]]:
-        """Extract embedding vectors from an Ollama /api/embed response.
-
-        Args:
-            response_data (dict): The parsed JSON response body.
-
-        Returns:
-            list[list[float]]: Embedding vectors in input order.
-
-        Raises:
-            ValueError: If the response does not contain valid embeddings.
-        """
         embeddings = response_data.get("embeddings")
         if not embeddings or not embeddings[0]:
             raise ValueError(
@@ -112,28 +82,7 @@ class LLMClientOllama(LLMClientInterface):
             )
         return embeddings
 
-    def _is_default_chat_response(self, response_data: dict) -> bool:
-        """Return True if message.content is a non-empty string."""
-        content = response_data.get("message", {}).get("content")
-        return bool(content)
-
-    def _is_tool_call_response(self, response_data: dict) -> bool:
-        """Return True if message.tool_calls is present and non-empty."""
-        tool_calls = response_data.get("message", {}).get("tool_calls")
-        return bool(tool_calls)
-
     def _parse_endpoint_chat(self, response_data: dict) -> str:
-        """Extract the assistant reply text from an Ollama /api/chat response.
-
-        Args:
-            response_data (dict): The parsed JSON response body.
-
-        Returns:
-            str: The assistant reply text.
-
-        Raises:
-            ValueError: If the response does not contain a valid message.
-        """
         message = response_data.get("message", {})
         content = message.get("content")
         if content is None:
@@ -142,34 +91,3 @@ class LLMClientOllama(LLMClientInterface):
                 "Response keys: %s" % list(response_data.keys())
             )
         return content
-
-    def _parse_tool_call_response(self, response_data: dict) -> str:
-        """Convert an Ollama native tool call response to ReAct-format text.
-
-        Ollama tool call responses have no content but carry a tool_calls list
-        and an optional thinking field. This method synthesises the ReAct lines
-        that the agent loop expects:
-
-            Thought: <thinking text>   (omitted when empty)
-            Action: <tool_name>
-            Action Input: <arguments as JSON>
-
-        Args:
-            response_data (dict): The parsed JSON response body.
-
-        Returns:
-            str: ReAct-formatted assistant text.
-        """
-        message = response_data.get("message", {})
-        tool_call = message.get("tool_calls", [{}])[0]
-        fn = tool_call.get("function", {})
-        tool_name = fn.get("name", "")
-        arguments = fn.get("arguments", {})
-
-        parts = []
-        thinking = message.get("thinking", "")
-        if thinking:
-            parts.append("Thought: %s" % thinking)
-        parts.append("Action: %s" % tool_name)
-        parts.append("Action Input: %s" % json.dumps(arguments, ensure_ascii=False))
-        return "\n".join(parts)

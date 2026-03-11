@@ -30,7 +30,8 @@
       "WebFetch(domain:docs.agenta.ai)",
       "WebFetch(domain:cloud.agenta.ai)",
       "WebFetch(domain:eu.cloud.agenta.ai)",
-      "Bash(mkdir -p /home/marcmeese/dms_ai_bridge/shared/clients/prompt/models /home/marcmeese/dms_ai_bridge/shared/clients/prompt/agenta && touch /home/marcmeese/dms_ai_bridge/shared/clients/prompt/__init__.py /home/marcmeese/dms_ai_bridge/shared/clients/prompt/models/__init__.py /home/marcmeese/dms_ai_bridge/shared/clients/prompt/agenta/__init__.py)"
+      "Bash(mkdir -p /home/marcmeese/dms_ai_bridge/shared/clients/prompt/models /home/marcmeese/dms_ai_bridge/shared/clients/prompt/agenta && touch /home/marcmeese/dms_ai_bridge/shared/clients/prompt/__init__.py /home/marcmeese/dms_ai_bridge/shared/clients/prompt/models/__init__.py /home/marcmeese/dms_ai_bridge/shared/clients/prompt/agenta/__init__.py)",
+      "WebFetch(domain:docs.anythingllm.com)"
     ]
   }
 }

@@ -135,8 +135,8 @@ Settings configured in `setup_args` appear in the AnythingLLM skill settings UI.
 
 ## dms-bridge-skill specifics
 
-- Tries `POST /chat/anythingllm` first (Phase IV ReAct agent → `data.answer`)
-- Falls back to `POST /query/anythingllm` (Phase III semantic search → `data.results`)
-- Note: fallback response field is `data.results`, NOT `data.points`
+- Calls `POST /tools/anythingllm/search_documents` directly
+- Response field is `data.results` (array of search result objects)
 - Auth: `X-Api-Key` header from `this.runtimeArgs.DMS_BRIDGE_API_KEY`
 - User identity: `this.runtimeArgs.DMS_BRIDGE_USER_ID` maps via `user_mapping.yml`
+- Configurable result limit via `this.runtimeArgs.DMS_BRIDGE_LIMIT` (default: 5)

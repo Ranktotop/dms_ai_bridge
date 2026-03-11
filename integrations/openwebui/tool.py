@@ -1,14 +1,16 @@
 """
-DMS AI Bridge — OpenWebUI Tool Function
+DMS AI Bridge — OpenWebUI Tool
 
-Deploy this file in OpenWebUI under Admin → Functions as a Tool.
-Attach the tool to any OpenWebUI model. The model decides when to call
-search_documents(); the Bridge handles ReAct reasoning and returns the answer.
+Deploy this file in OpenWebUI under Admin → Tools.
+Attach the tool set to any model. The model decides which tool to call and when.
 
 Self-contained: no imports from dms_ai_bridge.
 
-Calls POST /chat/openwebui/stream (SSE) with ReAct agent.
-Falls back to POST /query/openwebui (semantic search) if the stream fails.
+Tools exposed:
+  search_documents       — semantic search, returns merged results
+  list_filter_options    — correspondents, document types, tags
+  get_document_details   — metadata + content preview for a specific document
+  get_document_full      — paginated full text of a specific document
 """
 import json
 import httpx
@@ -19,127 +21,192 @@ class Tools:
     class Valves(BaseModel):
         BASE_URL: str = "http://dms-bridge:8000"
         API_KEY: str = ""
-        USER_ID: str = "5"
         LIMIT: int = 5
-        TIMEOUT: float = 120.0
+        TIMEOUT: float = 60.0
 
     def __init__(self) -> None:
         self.valves = self.Valves()
 
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _headers(self) -> dict:
+        return {"Content-Type": "application/json", "X-Api-Key": self.valves.API_KEY}
+
+    def _base(self) -> str:
+        return self.valves.BASE_URL.rstrip("/")
+
+    async def _post(self, path: str, body: dict) -> dict:
+        async with httpx.AsyncClient(timeout=self.valves.TIMEOUT) as client:
+            response = await client.post(
+                "%s%s" % (self._base(), path),
+                json=body,
+                headers=self._headers(),
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def _emit(self, emitter, description: str, done: bool) -> None:
+        if emitter is not None:
+            await emitter({"type": "status", "data": {"description": description, "done": done}})
+
+    # ------------------------------------------------------------------
+    # Tools
+    # ------------------------------------------------------------------
+
     async def search_documents(
         self,
         query: str,
+        __user__: dict = {},
         __event_emitter__=None,
     ) -> str:
-        """Search the personal document archive (invoices, contracts, letters, …).
+        """Search the personal document archive by semantic similarity.
 
         Use this tool whenever the user asks about documents, invoices, contracts,
         letters, receipts, or any files stored in the document management system.
 
         Args:
-            query: Natural language question about the user's documents.
+            query: Natural language search query.
 
         Returns:
-            str: Answer synthesised from relevant documents, or an error message.
+            str: Matching documents with title, metadata, and content preview.
         """
-
-        async def emit(description: str, done: bool) -> None:
-            if __event_emitter__ is not None:
-                await __event_emitter__(
-                    {"type": "status", "data": {"description": description, "done": done}}
-                )
-
-        if not query or not query.strip():
-            await emit("Fehler: Leere Suchanfrage.", done=True)
-            return "Error: Query cannot be empty."
-
-        base_url = self.valves.BASE_URL.rstrip("/")
-        headers = {
-            "Content-Type": "application/json",
-            "X-Api-Key": self.valves.API_KEY,
-        }
-        payload = {
-            "query": query,
-            "user_id": self.valves.USER_ID,
-            "limit": self.valves.LIMIT,
-        }
-
-        await emit("Suche in Dokumenten…", done=False)
-
-        # Attempt Phase IV endpoint: /chat/openwebui/stream (SSE with ReAct agent)
+        await self._emit(__event_emitter__, "🔍 Suche nach Dokumenten…", done=False)
         try:
-            stream_url = "%s/chat/openwebui/stream" % base_url
-            answer = ""
-
-            async with httpx.AsyncClient(timeout=self.valves.TIMEOUT) as client:
-                async with client.stream(
-                    "POST", stream_url, json=payload, headers=headers
-                ) as response:
-                    response.raise_for_status()
-                    async for line in response.aiter_lines():
-                        if not line.startswith("data: "):
-                            continue
-                        raw = line[6:]  # strip "data: " prefix
-                        if raw == "[DONE]":
-                            break
-                        try:
-                            event = json.loads(raw)
-                        except (json.JSONDecodeError, ValueError):
-                            continue
-                        event_type = event.get("type")
-                        chunk = event.get("chunk", "")
-                        if event_type == "step":
-                            if chunk:
-                                await emit(chunk, done=False)
-                        elif event_type == "answer":
-                            answer += chunk
-                        elif event_type == "citation":
-                            citation_data = event.get("data", {})
-                            if __event_emitter__ is not None:
-                                await __event_emitter__({"type": "citation", "data": citation_data})
-                        elif event_type is None and chunk.startswith("Error:"):
-                            # error event from the bridge — propagate immediately
-                            await emit(chunk, done=True)
-                            return chunk
-
-            if answer.strip():
-                await emit("Fertig", done=True)
-                return answer.strip()
-
-        except Exception as stream_error:  # noqa: BLE001
-            # stream failed — fall through to query fallback
-            await emit(
-                "Stream nicht verfügbar, nutze semantische Suche… (%s)" % str(stream_error),
-                done=False,
+            data = await self._post(
+                "/tools/openwebui/search_documents",
+                {"user_id": __user__.get("id", ""), "query": query, "limit": self.valves.LIMIT},
             )
-
-        # Fallback: Phase III endpoint: /query/openwebui (semantic search, no ReAct)
-        try:
-            query_url = "%s/query/openwebui" % base_url
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(query_url, json=payload, headers=headers)
-                response.raise_for_status()
-                data = response.json()
-
             results = data.get("results", [])
             if not results:
-                await emit("Keine Treffer gefunden.", done=True)
-                return "No documents found matching: %s" % query
+                await self._emit(__event_emitter__, "Keine Treffer.", done=True)
+                return "No documents found for: %s" % query
 
-            lines = ["Found %d document(s):" % len(results)]
-            for i, r in enumerate(results, start=1):
-                title = r.get("title") or r.get("dms_doc_id") or "Unknown"
-                score = r.get("score")
-                score_str = "%.3f" % score if score is not None else "—"
-                lines.append("%d. %s (score: %s)" % (i, title, score_str))
-                chunk_text = r.get("chunk_text", "")
-                if chunk_text:
-                    lines.append("   %s…" % chunk_text[:200].replace("\n", " "))
+            lines = []
+            for r in results:
+                lines.append("## %s (ID: %s, Score: %.3f)" % (r.get("title", "?"), r.get("dms_doc_id", "?"), r.get("score", 0)))
+                if r.get("created"):
+                    lines.append("Date: %s" % r["created"])
+                if r.get("correspondent"):
+                    lines.append("Correspondent: %s" % r["correspondent"])
+                if r.get("document_type"):
+                    lines.append("Type: %s" % r["document_type"])
+                if r.get("tags"):
+                    lines.append("Tags: %s" % ", ".join(r["tags"]))
+                if r.get("content"):
+                    lines.append("\n%s" % r["content"][:2000])
+                lines.append("")
 
-            await emit("Fertig (%d Treffer)" % len(results), done=True)
+            await self._emit(__event_emitter__, "Fertig (%d Treffer)" % len(results), done=True)
             return "\n".join(lines)
+        except Exception as e:
+            await self._emit(__event_emitter__, "Fehler: %s" % str(e), done=True)
+            return "Error searching documents: %s" % str(e)
 
-        except Exception as query_error:  # noqa: BLE001
-            error_msg = "Document search error: %s" % str(query_error)
-            await emit(error_msg, done=True)
-            return error_msg
+    async def list_filter_options(
+        self,
+        __user__: dict = {},
+        __event_emitter__=None,
+    ) -> str:
+        """List available filter options: correspondents, document types, and tags.
+
+        Call this before searching when the user mentions a name or term that could
+        match multiple correspondents or document types. Use the results to clarify.
+
+        Returns:
+            str: JSON-formatted filter options.
+        """
+        await self._emit(__event_emitter__, "🗂️ Lade Filter-Optionen…", done=False)
+        try:
+            data = await self._post(
+                "/tools/openwebui/list_filter_options",
+                {"user_id": __user__.get("id", "")},
+            )
+            await self._emit(__event_emitter__, "Filter geladen.", done=True)
+            return json.dumps(data, ensure_ascii=False, indent=2)
+        except Exception as e:
+            await self._emit(__event_emitter__, "Fehler: %s" % str(e), done=True)
+            return "Error fetching filter options: %s" % str(e)
+
+    async def get_document_details(
+        self,
+        document_id: str,
+        __user__: dict = {},
+        __event_emitter__=None,
+    ) -> str:
+        """Get metadata and content preview for a specific document by its ID.
+
+        Use this after search_documents to retrieve full details for a document
+        the user wants to know more about.
+
+        Args:
+            document_id: The DMS document ID (from search results).
+
+        Returns:
+            str: Document metadata and content.
+        """
+        await self._emit(__event_emitter__, "📄 Lade Dokumentdetails…", done=False)
+        try:
+            data = await self._post(
+                "/tools/openwebui/get_document_details",
+                {"user_id": __user__.get("id", ""), "document_id": document_id},
+            )
+            lines = [
+                "## %s (ID: %s)" % (data.get("title", "?"), data.get("dms_doc_id", "?")),
+            ]
+            if data.get("created"):
+                lines.append("Date: %s" % data["created"])
+            if data.get("correspondent"):
+                lines.append("Correspondent: %s" % data["correspondent"])
+            if data.get("document_type"):
+                lines.append("Type: %s" % data["document_type"])
+            if data.get("tags"):
+                lines.append("Tags: %s" % ", ".join(data["tags"]))
+            if data.get("content"):
+                lines.append("\n%s" % data["content"])
+            await self._emit(__event_emitter__, "Fertig.", done=True)
+            return "\n".join(lines)
+        except Exception as e:
+            await self._emit(__event_emitter__, "Fehler: %s" % str(e), done=True)
+            return "Error fetching document details: %s" % str(e)
+
+    async def get_document_full(
+        self,
+        document_id: str,
+        start_char: int = 0,
+        __user__: dict = {},
+        __event_emitter__=None,
+    ) -> str:
+        """Get the full text content of a document with pagination.
+
+        Use this to read the complete text of a document. For long documents,
+        call again with the returned next_start_char to read the next page.
+
+        Args:
+            document_id: The DMS document ID.
+            start_char: Character offset to start from (default: 0).
+
+        Returns:
+            str: Document text page with pagination info if truncated.
+        """
+        await self._emit(__event_emitter__, "📄 Lade vollständigen Text…", done=False)
+        try:
+            data = await self._post(
+                "/tools/openwebui/get_document_full",
+                {"user_id": __user__.get("id", ""), "document_id": document_id, "start_char": start_char},
+            )
+            content = data.get("content", "")
+            total = data.get("total_length", 0)
+            next_char = data.get("next_start_char")
+
+            result = content
+            if next_char is not None:
+                result += "\n\n[Document truncated. %d of %d chars shown. Call again with start_char=%d for more.]" % (
+                    start_char + len(content), total, next_char
+                )
+            await self._emit(__event_emitter__, "Fertig.", done=True)
+            return result
+        except Exception as e:
+            await self._emit(__event_emitter__, "Fehler: %s" % str(e), done=True)
+            return "Error fetching document: %s" % str(e)

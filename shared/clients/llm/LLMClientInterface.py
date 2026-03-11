@@ -1,10 +1,10 @@
 from abc import abstractmethod
+from dataclasses import dataclass
 
 import httpx
 from typing import Tuple
 from shared.clients.ClientInterface import ClientInterface
 from shared.helper.HelperConfig import HelperConfig
-
 
 class LLMClientInterface(ClientInterface):
     def __init__(self, helper_config: HelperConfig):
@@ -73,7 +73,7 @@ class LLMClientInterface(ClientInterface):
         """Returns the endpoint path for chat/completion requests (e.g. "/api/chat")."""
         pass
 
-    ################ PAYLOAD BUILDER ##################
+    ################ PAYLOADS ##################
     @abstractmethod
     def get_embed_payload(self, texts: list[str]) -> dict:
         """Build the backend-specific request body for an embedding request.
@@ -101,7 +101,8 @@ class LLMClientInterface(ClientInterface):
 
     @abstractmethod
     def get_model_details_payload(self) -> dict:
-        """Build the backend-specific request body for a model details request.
+        """
+        Build the backend-specific request body for a model details request.
 
         Returns:
             dict: JSON-serialisable request body (e.g. {"name": "..."}).
@@ -152,65 +153,6 @@ class LLMClientInterface(ClientInterface):
         """
         pass
 
-    @abstractmethod
-    def _parse_tool_call_response(self, response_data: dict) -> str:
-        """Extract the assistant reply text from a raw chat API response indicating a tool call.
-
-        Args:
-            response_data (dict): The parsed JSON response body.
-
-        Returns:
-            str: The assistant reply text.
-        """
-        pass
-
-    def _parse_delegated_chat_response(self, response_data: dict) -> str:
-        """Route the raw chat API response to the appropriate parser.
-
-        Checks in order: standard text reply → native tool call → error.
-        Subclasses control routing by implementing _is_default_chat_response()
-        and _is_tool_call_response().
-
-        Args:
-            response_data (dict): The parsed JSON response body.
-
-        Returns:
-            str: The assistant reply text.
-
-        Raises:
-            ValueError: If the response matches neither a standard reply nor a tool call.
-        """
-        if self._is_default_chat_response(response_data):
-            return self._parse_endpoint_chat(response_data)
-        if self._is_tool_call_response(response_data):
-            return self._parse_tool_call_response(response_data)
-        raise ValueError("Unexpected chat response format: %s" % list(response_data.keys()))
-
-    @abstractmethod
-    def _is_default_chat_response(self, response_data: dict) -> bool:
-        """Return True if the response is a standard text reply (not a native tool call).
-
-        Args:
-            response_data (dict): The parsed JSON response body.
-
-        Returns:
-            bool: True if _parse_endpoint_chat should handle this response.
-        """
-        pass
-
-    @abstractmethod
-    def _is_tool_call_response(self, response_data: dict) -> bool:
-        """Return True if the response contains a native tool call.
-
-        Args:
-            response_data (dict): The parsed JSON response body.
-
-        Returns:
-            bool: True if _parse_tool_call_response should handle this response.
-        """
-        pass
-
-
     ##########################################
     ############### REQUESTS #################
     ##########################################
@@ -256,7 +198,7 @@ class LLMClientInterface(ClientInterface):
         return self._parse_endpoint_embedding(response.json())
 
     async def do_chat(self, messages: list[dict]) -> str:
-        """Send a chat/completion request and return the assistant reply text.
+        """Send a plain chat/completion request and return the assistant reply text.
 
         Args:
             messages (list[dict]): OpenAI-format messages
@@ -276,7 +218,7 @@ class LLMClientInterface(ClientInterface):
             json=body,
             raise_on_error=True,
         )
-        return self._parse_delegated_chat_response(response_data=response.json())
+        return self._parse_endpoint_chat(response.json())
 
     async def do_chat_vision(self, messages: list[dict]) -> str:
         """Send a chat/completion request to vision model.

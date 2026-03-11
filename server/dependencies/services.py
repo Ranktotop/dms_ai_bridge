@@ -7,7 +7,6 @@ from shared.clients.dms.DMSClientInterface import DMSClientInterface
 from shared.clients.llm.LLMClientInterface import LLMClientInterface
 from shared.clients.rag.RAGClientInterface import RAGClientInterface
 from shared.helper.HelperConfig import HelperConfig
-from services.agent.AgentService import AgentService
 
 
 def get_sync_service(request: Request) -> SyncService:
@@ -36,7 +35,3 @@ def get_helper_config(request: Request) -> HelperConfig:
 
 def get_user_mapping_service(request: Request) -> UserMappingService:
     return request.app.state.user_mapping_service
-
-
-def get_agent_service(request: Request) -> AgentService:
-    return request.app.state.agent_service

@@ -1,10 +1,10 @@
 {
   "active": true,
   "hubId": "dms-bridge-skill",
-  "name": "DMS Document Search",
+  "name": "DMS Document Tools",
   "schema": "skill-1.0.0",
-  "version": "1.0.0",
-  "description": "Searches the personal document archive (invoices, contracts, letters, receipts, etc.) via dms_ai_bridge. Uses the ReAct agent for natural language answers, falls back to semantic search if unavailable.",
+  "version": "3.0.0",
+  "description": "Provides tool access to the personal document archive via dms_ai_bridge. Select the appropriate action and supply the matching parameters. Actions: search_documents (requires: query), list_filter_options (no extra params), get_document_details (requires: document_id), get_document_full (requires: document_id; optional: start_char).",
   "author": "dms_ai_bridge",
   "license": "MIT",
   "setup_args": {
@@ -45,34 +45,50 @@
         "type": "text",
         "default": "5",
         "placeholder": "5",
-        "hint": "Maximum number of results returned by the fallback semantic search endpoint"
+        "hint": "Maximum number of documents to return per search"
       }
     }
   },
   "examples": [
     {
       "prompt": "Search my documents for invoices from last year",
-      "call": "{\"query\": \"invoices from last year\"}"
+      "call": "{\"action\": \"search_documents\", \"query\": \"invoices from last year\"}"
     },
     {
-      "prompt": "Find all contracts with Max Mustermann",
-      "call": "{\"query\": \"contracts Max Mustermann\"}"
+      "prompt": "What correspondents and document types do I have?",
+      "call": "{\"action\": \"list_filter_options\"}"
     },
     {
-      "prompt": "Do I have any insurance documents?",
-      "call": "{\"query\": \"insurance documents\"}"
+      "prompt": "Show me the details of document 42",
+      "call": "{\"action\": \"get_document_details\", \"document_id\": \"42\"}"
     },
     {
-      "prompt": "Show me receipts from the supermarket",
-      "call": "{\"query\": \"supermarket receipts\"}"
+      "prompt": "Read the full text of document 42",
+      "call": "{\"action\": \"get_document_full\", \"document_id\": \"42\", \"start_char\": 0}"
+    },
+    {
+      "prompt": "Continue reading document 42",
+      "call": "{\"action\": \"get_document_full\", \"document_id\": \"42\", \"start_char\": 4000}"
     }
   ],
   "entrypoint": {
     "file": "handler.js",
     "params": {
-      "query": {
-        "description": "Natural language search query for the personal document archive",
+      "action": {
+        "description": "Tool action to perform: search_documents | list_filter_options | get_document_details | get_document_full",
         "type": "string"
+      },
+      "query": {
+        "description": "Natural language search query — required for search_documents",
+        "type": "string"
+      },
+      "document_id": {
+        "description": "DMS document ID from search results — required for get_document_details and get_document_full",
+        "type": "string"
+      },
+      "start_char": {
+        "description": "Character offset to start reading from — optional, for get_document_full pagination (default: 0)",
+        "type": "number"
       }
     }
   },

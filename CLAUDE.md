@@ -8,9 +8,9 @@ frontends (OpenWebUI, AnythingLLM) via semantic search.
 ## Project Goal
 
 Users ask questions in natural language about their documents. The bridge indexes all
-documents from a DMS into a vector database and answers search queries through a FastAPI
-server. A custom ReAct agent (no LangChain) handles intent classification and result
-synthesis.
+documents from a DMS into a vector database and serves structured tool endpoints via a
+FastAPI server. The frontend's LLM (OpenWebUI, AnythingLLM) calls the tools directly and
+handles orchestration and synthesis — no agent loop runs inside the bridge.
 
 ---
 
@@ -32,20 +32,20 @@ RAGClientInterface.do_upsert_points()   Ollama /api/embed
 Qdrant (vector store, owner_id-filtered)
   ▲
   │
-FastAPI (POST /query/{frontend})
+FastAPI (POST /tools/{frontend}/{tool_name})
   │── UserMappingService.resolve(frontend, user_id, engine) → owner_id
-  │── LLMClientInterface.do_embed()    ← embed query text
-  │── RAGClientInterface.do_search_points()   ← filter by owner_id + vector
-  └── LLMClientInterface.do_chat()     ← Phase IV synthesis
+  │── SearchService.do_search()             ← search_documents tool
+  │── SearchService.do_get_filter_options() ← list_filter_options tool
+  └── SearchService.do_fetch_full_by_doc_id() ← get_document_details / get_document_full tool
 
 OpenWebUI / AnythingLLM
-  └── POST /query/{frontend}  {"user_id": "5", "query": "..."}
+  └── POST /tools/{frontend}/{tool_name}  {"user_id": "5", ...}
          │  frontend = path param ("openwebui" | "anythingllm" | …)
          ▼
   UserMappingService reads config/user_mapping.yml
          │  resolve("openwebui", "5", "paperless") → owner_id=3
          ▼
-  SearchService.do_search(query, owner_id=3, …)
+  SearchService operation with owner_id filter
 ```
 
 Additional DMS backends, RAG backends, and LLM providers can be added without touching
@@ -60,8 +60,9 @@ picks them up automatically.
 |---|---|---|
 | I | Shared infrastructure, DMS client, RAG client, SyncService | Complete |
 | II | LLM client (embedding via Ollama) | Complete |
-| III | FastAPI server — POST /webhook/{engine}/document + POST /query (scroll-based) | Complete |
-| IV | Custom ReAct agent, vector similarity search, LLM synthesis | Complete |
+| II+ | Cache client (Redis), OCR client (Docling), Document ingestion pipeline | Complete |
+| III | FastAPI server — POST /webhook/{engine}/document + POST /query/{frontend} | Complete |
+| IV | BridgeAPI — POST /tools/{frontend}/{tool_name} direct tool endpoints | Complete |
 
 ---
 
@@ -376,16 +377,8 @@ dms_ai_bridge/
 │   ├── dms_rag_sync/
 │   │   ├── SyncService.py               ← DMS → embed → RAG orchestration
 │   │   └── dms_rag_sync.py              ← entry point (python -m services.dms_rag_sync)
-│   ├── agent/
-│   │   ├── AgentService.py              ← ReAct loop orchestrator
-│   │   └── tools/
-│   │       ├── AgentToolInterface.py    ← abstract tool base ABC
-│   │       ├── AgentToolManager.py      ← tool registry + descriptions builder
-│   │       ├── search_documents/        ← AgentToolSearchDocuments
-│   │       ├── list_filter_options/     ← AgentToolListFilterOptions
-│   │       └── get_document_details/    ← AgentToolGetDocumentDetails
 │   └── rag_search/
-│       ├── SearchService.py             ← embed → scroll → list[SearchResult] (no FastAPI)
+│       ├── SearchService.py             ← embed → search → list[PointHighDetails] (no FastAPI)
 │       └── helper/
 │           └── IdentityHelper.py        ← resolves frontend user_id → owner_id map
 ├── config/
@@ -396,13 +389,14 @@ dms_ai_bridge/
     │   ├── HealthRouter.py              ← GET /health, GET /health/deep (no auth)
     │   ├── WebhookRouter.py             ← POST /webhook/{engine}/document
     │   ├── QueryRouter.py               ← POST /query/{frontend} (thin adapter → SearchService)
-    │   └── ChatRouter.py                ← POST /chat/{frontend} + /stream (ReAct agent)
+    │   └── ToolsRouter.py               ← POST /tools/{frontend}/{tool_name} (BridgeAPI)
     ├── dependencies/
     │   ├── auth.py                      ← X-API-Key verification
-    │   └── services.py                  ← FastAPI Depends helpers (get_search_service, …)
+    │   ├── services.py                  ← FastAPI Depends helpers (get_search_service, …)
+    │   └── identity.py                  ← get_verified_identity_helper()
     ├── models/
-    │   ├── requests.py                  ← WebhookRequest, SearchRequest (user_id, not owner_id)
-    │   └── responses.py                 ← SearchResultItem, SearchResponse
+    │   ├── requests.py                  ← WebhookRequest, SearchRequest, Tool*Request
+    │   └── responses.py                 ← SearchResultItem, SearchResponse, Tool*Response
     └── user_mapping/
         ├── UserMappingService.py        ← resolve(frontend, user_id, engine) → owner_id
         └── models.py                    ← UserMapping Pydantic models
@@ -412,7 +406,7 @@ dms_ai_bridge/
 
 ## Agent Responsibilities
 
-Nine specialised agents own distinct subsystems. Invoke the correct agent for any task
+Eight specialised agents own distinct subsystems. Invoke the correct agent for any task
 touching that subsystem. Agents that own interfaces must coordinate before changing
 public method signatures.
 
@@ -574,45 +568,6 @@ changing search/ranking logic in `SearchService`.
 
 ---
 
-### `agent-agent` — ReAct Agent Subsystem
-**Model:** `claude-sonnet-4-6`
-
-**Owns:**
-- `services/agent/AgentService.py` — ReAct loop orchestrator
-- `services/agent/tools/AgentToolResult.py` — `CitationRef` + `AgentToolResult` dataclasses
-- `services/agent/tools/AgentToolInterface.py` — abstract tool base ABC
-- `services/agent/tools/AgentToolManager.py` — tool registry + descriptions builder
-- `services/agent/tools/search_documents/AgentToolSearchDocuments.py`
-- `services/agent/tools/list_filter_options/AgentToolListFilterOptions.py`
-- `services/agent/tools/get_document_details/AgentToolGetDocumentDetails.py`
-- `services/agent/tools/get_document_full/AgentToolGetDocumentFull.py`
-
-**Invoke when:**
-modifying the ReAct loop, adding or changing a tool, changing the step_callback
-mechanism, updating the system prompt, or adjusting how tool errors are handled.
-
-**Key rules:**
-- No FastAPI imports in `services/agent/` — keep the subsystem framework-agnostic
-- System prompt only via `_get_system_prompt()` getter — never as a module-level constant
-- `step_callback` is optional — always guard with `if step_callback:` before calling
-- Tool errors: log the exception, return `AgentToolResult(observation="...", citations=[])` —
-  never re-raise out of `do_execute()`, never return plain `str`
-- `do_execute()` return type is always `AgentToolResult` — never `str`
-- New tool: create `services/agent/tools/{tool_name}/AgentTool{Name}.py`, inherit
-  `AgentToolInterface`, implement `do_execute()` and `get_step_hint()`, register in
-  `AgentToolManager`
-
-**Key contracts:**
-- `AgentResponse` has fields: `answer: str`, `tool_calls: list[str]`, `citations: list[CitationRef]`
-- `AgentService.do_run(query, chat_history, max_iterations, step_callback, identity_helper, client_settings) -> AgentResponse`
-  — consumed by api-agent's `ChatRouter`; never change this signature without notifying api-agent
-- Tools read `SearchService.do_search()` and `SearchService.do_fetch_by_doc_id()` —
-  coordinate signature changes with service-agent
-
-**Strict boundary — api-agent must NEVER edit files under `services/agent/`.**
-
----
-
 ### `ingestion-agent` — Document Ingestion Pipeline
 **Model:** `claude-sonnet-4-6`
 
@@ -721,17 +676,18 @@ pdf backend), or adding new conversion capabilities to `OCRClientInterface`.
 - `server/routers/HealthRouter.py` — `GET /health`, `GET /health/deep`
 - `server/routers/WebhookRouter.py` — `POST /webhook/{engine}/document`
 - `server/routers/QueryRouter.py` — `POST /query/{frontend}` (thin adapter over `SearchService`)
-- `server/routers/ChatRouter.py` — `POST /chat/{frontend}` + `POST /chat/{frontend}/stream`
+- `server/routers/ToolsRouter.py` — `POST /tools/{frontend}/{tool_name}` (BridgeAPI)
 - `server/dependencies/auth.py` — `X-API-Key` verification
 - `server/dependencies/services.py` — FastAPI `Depends` helpers
-- `server/models/requests.py` — `WebhookRequest`, `SearchRequest`
-- `server/models/responses.py` — `SearchResultItem`, `SearchResponse`
+- `server/dependencies/identity.py` — `get_verified_identity_helper()`
+- `server/models/requests.py` — `WebhookRequest`, `SearchRequest`, `Tool*Request`
+- `server/models/responses.py` — `SearchResultItem`, `SearchResponse`, `Tool*Response`
 - `server/user_mapping/UserMappingService.py` — loads `config/user_mapping.yml`, resolves user identities
 - `server/user_mapping/models.py` — `UserMapping` Pydantic models
 
 **Invoke when:**
-creating the FastAPI app, adding routes, wiring `SearchService` into `QueryRouter`,
-implementing `UserMappingService`, or implementing auth middleware.
+creating the FastAPI app, adding routes, wiring `SearchService` into routers,
+implementing `UserMappingService`, implementing auth middleware, or modifying tool endpoints.
 
 **Key rules:**
 - All route handlers: `async def`
@@ -741,10 +697,9 @@ implementing `UserMappingService`, or implementing auth middleware.
   `SearchService` or any RAG/DMS call
 - Missing mapping → HTTP 403, never fall back to a default owner
 - Use `BackgroundTasks` for the webhook — never `asyncio.create_task()` in route handlers
-- `QueryRouter` is a thin adapter: resolve user_id → owner_id → call `SearchService.do_search()` →
-  map `list[SearchResult]` to `SearchResponse` — no embed, scroll, or LLM logic in the router
+- `ToolsRouter` endpoints are thin adapters: resolve user_id → `IdentityHelper` → call
+  `SearchService` → map to response model — no orchestration or LLM logic in the router
 - Every subdirectory under `server/` needs `__init__.py` for uvicorn module resolution
-- Phase IV is complete — `ChatRouter` is a thin adapter over `AgentService` (owned by agent-agent)
 
 **API contracts:**
 ```
@@ -758,6 +713,22 @@ POST /query/{frontend}
   Request:  {"query": "...", "user_id": "5", "limit": 5, "chat_history": [...]}
   Response: {"query": "...", "results": [...], "total": N}
   Mapping:  UserMappingService.resolve(frontend, user_id, engine) → owner_id (or 403)
+
+POST /tools/{frontend}/search_documents
+  Request:  {"user_id": "5", "query": "...", "limit": 5}
+  Response: {"results": [{dms_doc_id, title, content, score, created, ...}]}
+
+POST /tools/{frontend}/list_filter_options
+  Request:  {"user_id": "5"}
+  Response: {"correspondents": [...], "document_types": [...], "tags": [...]}
+
+POST /tools/{frontend}/get_document_details
+  Request:  {"user_id": "5", "document_id": "42"}
+  Response: [{dms_doc_id, title, content, created, correspondent, document_type, tags, view_url}]
+
+POST /tools/{frontend}/get_document_full
+  Request:  {"user_id": "5", "document_id": "42", "start_char": 0}
+  Response: {"content": "...", "total_length": N, "next_start_char": N | null}
 ```
 
 ---
@@ -874,8 +845,8 @@ SYSTEM_PROMPT = "You are a ..."
 - Never accumulate unrelated methods in one class
 
 ### Naming
-- Services: `*Service.py` (e.g. `AgentService`, not `ReActAgent`)
-- No deep structural nesting — prefer `services/agent` over `services/rag_search/agent`
+- Services: `*Service.py` (e.g. `SearchService`, not `SearchHelper`)
+- No deep structural nesting — prefer `services/rag_search` over `services/search/rag`
 
 ---
 
@@ -889,10 +860,9 @@ SYSTEM_PROMPT = "You are a ..."
 | Redis, `CacheClientInterface`, filter option cache, cache invalidation | `cache-agent` |
 | Ollama, `LLMClientInterface`, embedding, chat, new LLM provider | `embed-llm-agent` |
 | Sync pipeline, `SyncService`, `SearchService`, orphan cleanup | `service-agent` |
-| ReAct loop, `AgentService`, agent tools, `step_callback`, system prompt | `agent-agent` |
 | File ingestion, `Document`, `DocumentConverter`, `IngestionService` | `ingestion-agent` |
 | `OCRClientInterface`, `OCRClientDocling`, `OCR_ENGINE`, Docling backend | `ocr-agent` |
-| FastAPI routes, `QueryRouter`, webhook, auth, Phase III/IV server | `api-agent` |
+| FastAPI routes, `ToolsRouter`, `QueryRouter`, webhook, auth, server | `api-agent` |
 | `UserMappingService`, `user_mapping.yml`, frontend/user_id resolution | `api-agent` |
 
 **Cross-cutting changes** (e.g. adding a field to `Point.py` models, changing a `ClientInterface`

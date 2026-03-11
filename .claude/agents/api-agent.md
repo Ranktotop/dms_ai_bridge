@@ -4,11 +4,11 @@ description: >
   Owns the FastAPI server layer: api_server.py with lifespan client management,
   WebhookRouter (POST /webhook/{engine}/document — incremental sync via BackgroundTasks),
   QueryRouter (POST /query/{frontend} — thin adapter over SearchService),
-  ChatRouter (POST /chat/{frontend} + /stream — thin adapter over AgentService),
-  UserMappingService (resolves frontend user_id to DMS owner_id via user_mapping.yml),
-  and authentication dependency (X-API-Key). Invoke when: creating the FastAPI app,
-  adding routes, wiring SearchService or AgentService into routers, implementing or
-  changing user identity mapping, or implementing auth middleware.
+  ToolsRouter (POST /tools/{frontend}/{tool_name} — direct tool endpoints for AI frontend
+  integrations), UserMappingService (resolves frontend user_id to DMS owner_id via
+  user_mapping.yml), and authentication dependency (X-API-Key). Invoke when: creating
+  the FastAPI app, adding routes, wiring SearchService into routers, implementing or
+  changing user identity mapping, implementing auth middleware, or modifying tool endpoints.
 tools:
   - Read
   - Write
@@ -33,8 +33,9 @@ multiple AI frontends, each with their own user namespace. You resolve the exter
 (from the request) to the DMS-internal `owner_id` (used by all backend services) via
 `UserMappingService` before any search or sync operation.
 
-Phase IV (custom ReAct agent) is complete. `ChatRouter` is a thin adapter over `AgentService`
-— no agent logic lives in the router. Agent ownership belongs to agent-agent.
+The BridgeAPI architecture replaces the former ReAct agent: each `/tools/{frontend}/{tool_name}`
+endpoint performs exactly one operation and returns structured data. The frontend's LLM handles
+orchestration and synthesis — no agent loop lives in the bridge server.
 
 ## Directories and Modules
 
@@ -42,11 +43,12 @@ Phase IV (custom ReAct agent) is complete. `ChatRouter` is a thin adapter over `
 - `server/api_server.py` — FastAPI entry point with lifespan
 - `server/routers/WebhookRouter.py` — `POST /webhook/{engine}/document`
 - `server/routers/QueryRouter.py` — `POST /query/{frontend}` (thin adapter over SearchService)
-- `server/routers/ChatRouter.py` — `POST /chat/{frontend}` + `POST /chat/{frontend}/stream` (thin adapter over AgentService)
+- `server/routers/ToolsRouter.py` — `POST /tools/{frontend}/{tool_name}` (direct tool endpoints)
 - `server/dependencies/auth.py` — `X-API-Key` verification
 - `server/dependencies/services.py` — FastAPI `Depends` helpers
-- `server/models/requests.py` — `WebhookRequest`, `SearchRequest`
-- `server/models/responses.py` — `SearchResultItem`, `SearchResponse`, `ChatResponse`
+- `server/dependencies/identity.py` — `get_verified_identity_helper()` helper
+- `server/models/requests.py` — `WebhookRequest`, `SearchRequest`, `ToolSearchRequest`, etc.
+- `server/models/responses.py` — `SearchResultItem`, `SearchResponse`, `ToolSearchResponse`, etc.
 - `server/user_mapping/UserMappingService.py` — loads `config/user_mapping.yml`, resolves identities
 - `server/user_mapping/models.py` — `UserMapping` Pydantic models
 - `config/user_mapping.yml` — mapping config (path via `USER_MAPPING_FILE` env var)
@@ -57,13 +59,10 @@ Phase IV (custom ReAct agent) is complete. `ChatRouter` is a thin adapter over `
 - `shared/clients/llm/LLMClientInterface.py` and `LLMClientManager`
 - `shared/clients/cache/CacheClientInterface.py` and `CacheClientManager`
 - `services/dms_rag_sync/SyncService.py` — only `do_incremental_sync(document_id, engine)`
-- `services/rag_search/SearchService.py` — only `do_search(query, owner_id, limit, chat_history)`
-- `services/agent/AgentService.py` — only `AgentService.do_run()` and `AgentResponse`
-- `services/agent/tools/AgentToolResult.py` — only `CitationRef` (read the type, never edit)
+- `services/rag_search/SearchService.py` — only `do_search()`, `do_fetch_full_by_doc_id()`, `do_get_filter_options()`
 - `shared/helper/HelperConfig.py` and `shared/logging/logging_setup.py`
 
 **STRICT BOUNDARY — files api-agent must NEVER edit:**
-- Anything under `services/agent/` — owned exclusively by agent-agent
 - Anything under `services/dms_rag_sync/` or `services/rag_search/` — owned by service-agent
 - Anything under `shared/clients/` — owned by the respective client agent
 
@@ -123,45 +122,28 @@ Request:  {"query": "...", "user_id": "5", "limit": 5, "chat_history": [...]}
 Response: {"query": "...", "results": [...], "total": N}
 ```
 
-## Request / Response Models
+### POST /tools/{frontend}/search_documents
+```
+Request:  {"user_id": "5", "query": "...", "limit": 5}
+Response: {"results": [{dms_doc_id, title, content, score, created, correspondent, document_type, tags, view_url}]}
+```
 
-```python
-# requests.py
-class WebhookRequest(BaseModel):
-    document_id: int
+### POST /tools/{frontend}/list_filter_options
+```
+Request:  {"user_id": "5"}
+Response: {"correspondents": [...], "document_types": [...], "tags": [...]}
+```
 
-class SearchRequest(BaseModel):
-    query: str
-    user_id: str              # external frontend user ID — resolved to owner_id in router
-    limit: int = 5
-    chat_history: list[dict] = []
+### POST /tools/{frontend}/get_document_details
+```
+Request:  {"user_id": "5", "document_id": "42"}
+Response: [{dms_doc_id, title, content, created, correspondent, document_type, tags, view_url}]
+```
 
-# responses.py
-class SearchResultItem(BaseModel):
-    dms_doc_id: str
-    title: str
-    score: float
-    chunk_text: str | None = None
-    category_name: str | None = None
-    type_name: str | None = None
-    label_names: list[str] = []
-    created: str | None = None
-
-class SearchResponse(BaseModel):
-    query: str
-    results: list[SearchResultItem]
-    total: int
-
-class CitationItem(BaseModel):
-    dms_doc_id: str
-    dms_engine: str
-    title: str | None = None
-    url: str | None = None
-
-class ChatResponse(BaseModel):
-    query: str
-    answer: str
-    citations: list[CitationItem] = []
+### POST /tools/{frontend}/get_document_full
+```
+Request:  {"user_id": "5", "document_id": "42", "start_char": 0}
+Response: {"content": "...", "total_length": N, "next_start_char": N | null}
 ```
 
 ## Coding Conventions
@@ -176,8 +158,8 @@ Follow all conventions in CLAUDE.md. Additional rules for this agent:
 - Use FastAPI `BackgroundTasks` for webhook; never raw `asyncio.create_task()` in routes
 - `QueryRouter` is a thin adapter — no embed, scroll, or LLM logic inside it
 - Every subdirectory under `server/` needs `__init__.py` for uvicorn module resolution
-- `ChatRouter` is a thin adapter: resolve user_id → `IdentityHelper` → call
-  `AgentService.do_run()` → return `ChatResponse`; no agent logic in the router
+- `ToolsRouter` endpoints are thin adapters: resolve user_id → `IdentityHelper` → call
+  `SearchService` method → map result to response model; no orchestration or LLM logic in the router
 
 ## Communication with Other Agents
 
@@ -187,8 +169,7 @@ Follow all conventions in CLAUDE.md. Additional rules for this agent:
 - embed-llm-agent: `LLMClientManager`, `LLMClientInterface` (via lifespan wiring only)
 - cache-agent: `CacheClientManager`, `CacheClientInterface` (via lifespan wiring only)
 - service-agent: `SyncService.do_incremental_sync(document_id, engine)` as webhook background task
-- service-agent: `SearchService.do_search(query, owner_id, limit, chat_history)` as query handler
-- agent-agent: `AgentService.do_run(query, chat_history, max_iterations, step_callback, identity_helper, client_settings)` as chat handler
+- service-agent: `SearchService.do_search()`, `do_fetch_full_by_doc_id()`, `do_get_filter_options()` as tool handlers
 - infra-agent: `HelperConfig`, `setup_logging()`
 
 **This agent produces:**
@@ -198,10 +179,9 @@ Follow all conventions in CLAUDE.md. Additional rules for this agent:
 **Coordination points:**
 - Before implementing WebhookRouter: confirm `do_incremental_sync(document_id: int, engine: str)`
   exists on SyncService with that exact signature (coordinate with service-agent)
-- Before implementing QueryRouter: confirm `do_search(query, owner_id, limit, chat_history)`
-  exists on SearchService with that exact signature (coordinate with service-agent)
-- Before changing `ChatRouter` behaviour: confirm `AgentService.do_run()` signature with agent-agent
-- If you need additional fields on search results, confirm they are in `SearchResult` with
-  service-agent and in `PointHighDetails` / `Point.py` with rag-agent before reading from result objects
+- Before implementing QueryRouter or ToolsRouter: confirm `do_search()`, `do_fetch_full_by_doc_id()`,
+  `do_get_filter_options()` signatures with service-agent
+- If you need additional fields on search results, confirm they are in `PointHighDetails` / `Point.py`
+  with rag-agent before reading from result objects
 - `UserMappingService.reverse_resolve()` result is used by service-agent's SyncService for
   webhook cache invalidation — coordinate key format changes with service-agent

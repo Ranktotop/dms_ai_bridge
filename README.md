@@ -7,9 +7,10 @@ Intelligent middleware between Document Management Systems (e.g.
 
 The bridge indexes documents from a DMS into a [Qdrant](https://qdrant.tech/) vector database
 using [Ollama](https://ollama.com/) embeddings. A separate ingestion pipeline converts and
-uploads files from a local inbox into Paperless-ngx. A FastAPI server (Phase III) exposes a
-semantic search endpoint and a webhook listener so the index stays in sync whenever a document
-is added or updated.
+uploads files from a local inbox into Paperless-ngx. A FastAPI server exposes structured tool
+endpoints so AI frontends (OpenWebUI, AnythingLLM) can call document search, filter options,
+and document detail retrieval directly — the frontend LLM handles orchestration and synthesis.
+A webhook listener keeps the index in sync whenever a document is added or updated.
 
 ---
 
@@ -40,11 +41,11 @@ RAGClientInterface.do_upsert_points()   Ollama /api/embed
 Qdrant (vector store, owner_id-filtered)
   ▲
   │
-FastAPI (POST /query/{frontend})        ← Phase III
+FastAPI (POST /tools/{frontend}/{tool_name})   ← Phase IV BridgeAPI
   │── UserMappingService.resolve(frontend, user_id, engine) → owner_id
-  │── LLMClientInterface.do_embed()
-  │── RAGClientInterface.do_search_points()
-  └── LLMClientInterface.do_chat()      ← Phase IV
+  │── SearchService.do_search()              ← search_documents
+  │── SearchService.do_get_filter_options()  ← list_filter_options
+  └── SearchService.do_fetch_full_by_doc_id() ← get_document_details / get_document_full
 ```
 
 Interface hierarchy (generic → concrete):
@@ -71,7 +72,7 @@ relevant interface and are picked up automatically by setting the appropriate en
 | II | LLM client — embedding + chat via Ollama | Complete |
 | II+ | Cache client (Redis), OCR client (Docling), Document ingestion pipeline | Complete |
 | III | FastAPI server — `POST /webhook/{engine}/document` + `POST /query/{frontend}` | Complete |
-| IV | Custom ReAct agent, vector similarity search, LLM synthesis | Complete |
+| IV | BridgeAPI — `POST /tools/{frontend}/{tool_name}` direct tool endpoints | Complete |
 
 ### Phase I — Infrastructure (complete)
 
@@ -125,12 +126,13 @@ relevant interface and are picked up automatically by setting the appropriate en
 - `X-API-Key` authentication on all endpoints
 - `GET /health` — shallow health check (no auth); `GET /health/deep` — probes all backends
 
-### Phase IV — Agentic Logic (complete)
+### Phase IV — BridgeAPI (complete)
 
-- Custom ReAct agent with multi-step reasoning (no LangChain dependency)
-- LLM-based query classification — extracts correspondent, document type, and tag filters
-- Result synthesis with LLM summarisation
-- SSE streaming via `POST /chat/{frontend}/stream`
+- `POST /tools/{frontend}/{tool_name}` — direct tool endpoints for AI frontend integrations
+- Four tools: `search_documents`, `list_filter_options`, `get_document_details`, `get_document_full`
+- Each endpoint performs exactly one operation; the frontend LLM handles orchestration
+- Results are merged per document (chunks from the same document are concatenated)
+- Paginated full-text retrieval via `get_document_full` with `start_char` / `next_start_char`
 
 ---
 
@@ -190,16 +192,8 @@ dms_ai_bridge/
 │   ├── dms_rag_sync/
 │   │   ├── SyncService.py               # DMS → embed → RAG orchestration
 │   │   └── dms_rag_sync.py              # Entry point (python -m services.dms_rag_sync)
-│   ├── agent/
-│   │   ├── AgentService.py              # ReAct loop orchestrator
-│   │   └── tools/
-│   │       ├── AgentToolInterface.py    # Abstract tool base ABC
-│   │       ├── AgentToolManager.py      # Tool registry + descriptions builder
-│   │       ├── search_documents/        # AgentToolSearchDocuments
-│   │       ├── list_filter_options/     # AgentToolListFilterOptions
-│   │       └── get_document_details/    # AgentToolGetDocumentDetails
 │   └── rag_search/
-│       ├── SearchService.py             # embed → search → list[SearchResult]
+│       ├── SearchService.py             # embed → search → list[PointHighDetails]
 │       └── helper/
 │           └── IdentityHelper.py        # Resolves frontend user_id → owner_id map
 ├── config/
@@ -209,13 +203,14 @@ dms_ai_bridge/
     ├── routers/
     │   ├── WebhookRouter.py             # POST /webhook/{engine}/document
     │   ├── QueryRouter.py               # POST /query/{frontend}
-    │   └── ChatRouter.py                # POST /chat/{frontend} + /stream (ReAct agent)
+    │   └── ToolsRouter.py               # POST /tools/{frontend}/{tool_name} (BridgeAPI)
     ├── dependencies/
     │   ├── auth.py                      # X-API-Key verification
-    │   └── services.py                  # FastAPI Depends helpers
+    │   ├── services.py                  # FastAPI Depends helpers
+    │   └── identity.py                  # get_verified_identity_helper()
     ├── models/
-    │   ├── requests.py                  # WebhookRequest, SearchRequest
-    │   └── responses.py                 # SearchResultItem, SearchResponse
+    │   ├── requests.py                  # WebhookRequest, SearchRequest, Tool*Request
+    │   └── responses.py                 # SearchResultItem, SearchResponse, Tool*Response
     └── user_mapping/
         ├── UserMappingService.py        # resolve(frontend, user_id, engine) → owner_id
         └── models.py                    # UserMapping Pydantic models
@@ -406,33 +401,72 @@ Semantic vector search against the Qdrant index with LLM-based query classificat
 }
 ```
 
-### `POST /chat/{frontend}`
+### `POST /tools/{frontend}/search_documents`
 
-ReAct agent — returns a synthesised natural language answer.
+Semantic search — returns merged results (one entry per document).
 
 **Request**
 ```json
-{ "query": "Summarise my invoices from 2024", "user_id": "5" }
+{ "user_id": "5", "query": "Invoice from ACME 2024", "limit": 5 }
 ```
 
 **Response**
 ```json
-{ "query": "Summarise my invoices from 2024", "answer": "In 2024 you received..." }
+{
+  "results": [
+    {
+      "dms_doc_id": "42", "title": "Invoice ACME", "score": 0.91,
+      "content": "...", "created": "2024-01-15",
+      "correspondent": "ACME GmbH", "document_type": "Invoice",
+      "tags": ["2024"], "view_url": "https://paperless/documents/42/"
+    }
+  ]
+}
 ```
 
-### `POST /chat/{frontend}/stream`
+### `POST /tools/{frontend}/list_filter_options`
 
-ReAct agent — streams the answer word-by-word as Server-Sent Events.
+Returns available filter values for the authenticated user.
 
-**SSE format**
+**Request**
+```json
+{ "user_id": "5" }
 ```
-data: {"type": "step", "chunk": "🔍 Suche nach Dokumenten..."}
-data: {"type": "answer", "chunk": "In "}
-data: {"type": "answer", "chunk": "2024 "}
-...
-data: {"type": "step", "chunk": "✅ Fertig"}
-data: [DONE]
+
+**Response**
+```json
+{ "correspondents": ["ACME GmbH", "Bank AG"], "document_types": ["Invoice"], "tags": ["2024"] }
 ```
+
+### `POST /tools/{frontend}/get_document_details`
+
+Returns full metadata and content for a specific document.
+
+**Request**
+```json
+{ "user_id": "5", "document_id": "42" }
+```
+
+**Response**
+```json
+[{ "dms_doc_id": "42", "title": "Invoice ACME", "content": "...", "view_url": "..." }]
+```
+
+### `POST /tools/{frontend}/get_document_full`
+
+Returns paginated full text of a document (4000 chars per page).
+
+**Request**
+```json
+{ "user_id": "5", "document_id": "42", "start_char": 0 }
+```
+
+**Response**
+```json
+{ "content": "...", "total_length": 12500, "next_start_char": 4000 }
+```
+
+Call again with `start_char: 4000` to read the next page. `next_start_char` is `null` on the last page.
 
 `user_id` is resolved to an internal `owner_id` via `UserMappingService` before any search
 is performed. Unknown users receive HTTP 403 — no fallback default owner.
@@ -443,27 +477,31 @@ is performed. Unknown users receive HTTP 403 — no fallback default owner.
 
 Pre-built connectors are available in the `integrations/` directory.
 
-### OpenWebUI (`integrations/openwebui/pipeline.py`)
+### OpenWebUI (`integrations/openwebui/tool.py`)
 
-A pipeline plugin that connects OpenWebUI to dms_ai_bridge via the `/chat/openwebui` and
-`/chat/openwebui/stream` endpoints.
+A native OpenWebUI tool set that exposes four tools to any model: `search_documents`,
+`list_filter_options`, `get_document_details`, and `get_document_full`. The model decides
+which tool to call and synthesises the answer — no agent loop runs on the bridge.
 
-1. Copy `integrations/openwebui/pipeline.py` to your OpenWebUI `pipelines/` directory.
-2. Restart OpenWebUI and configure the Valves in Admin Panel → Pipelines:
+1. Deploy `integrations/openwebui/tool.py` under Admin → Tools in OpenWebUI.
+2. Attach the tool set to any model and configure the Valves:
    - `BASE_URL` — dms_ai_bridge server URL (default: `http://dms-bridge:8000`)
    - `API_KEY` — matches `APP_API_KEY` in your `.env`
-   - `USER_ID` — OpenWebUI user ID mapped in `config/user_mapping.yml`
+   - `LIMIT` — max search results (default: 5)
+
+OpenWebUI automatically passes the logged-in user's ID via `__user__["id"]` — no manual `USER_ID` configuration required.
 
 ### AnythingLLM (`integrations/anythingllm/dms-bridge-skill/`)
 
-An agent skill that gives AnythingLLM document search capabilities via `/chat/anythingllm`
-(falls back to `/query/anythingllm` if the chat endpoint is unavailable).
+An agent skill that gives AnythingLLM document search capabilities via
+`POST /tools/anythingllm/search_documents`.
 
 1. Copy the `integrations/anythingllm/dms-bridge-skill/` folder to the AnythingLLM custom skills directory (contains `handler.js`, `plugin.json`, `package.json`).
 2. Enable the "DMS Document Search" skill in Agent Settings and configure:
-   - `API_URL` — dms_ai_bridge server URL (default: `http://dms-bridge:8000`)
-   - `API_KEY` — matches `APP_API_KEY` in your `.env`
-   - `USER_ID` — AnythingLLM user ID mapped in `config/user_mapping.yml`
+   - `DMS_BRIDGE_URL` — dms_ai_bridge server URL (default: `http://dms-bridge:8000`)
+   - `DMS_BRIDGE_API_KEY` — matches `APP_API_KEY` in your `.env`
+   - `DMS_BRIDGE_USER_ID` — AnythingLLM user ID mapped in `config/user_mapping.yml`
+   - `DMS_BRIDGE_LIMIT` — max search results (default: 5)
 
 ---
 

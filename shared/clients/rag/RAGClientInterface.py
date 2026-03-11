@@ -3,6 +3,7 @@ import re
 
 import httpx
 from shared.clients.rag.models.Point import PointUpsert, PointHighDetails, PointsListResponse
+from shared.clients.rag.models.Document import DocumentBase
 from shared.clients.ClientInterface import ClientInterface
 import json
 
@@ -628,7 +629,7 @@ class RAGClientInterface(ClientInterface):
             result.append(tail + "\n" + chunks[i])
         return result
 
-    async def do_reconstruct_document_content(self, dms_engine: str, dms_doc_id: str, owner_id: str) -> str | None:
+    async def do_reconstruct_document_content(self, dms_engine: str, dms_doc_id: str, owner_id: str) -> DocumentBase | None:
         """Reconstruct the original document text from its RAG chunks.
 
         Fetches all points for the given document, sorts them by chunk_index,
@@ -646,7 +647,7 @@ class RAGClientInterface(ClientInterface):
             dms_doc_id (str): Document ID within that DMS engine.
             owner_id (str): Owner ID as string — enforced for access isolation.
         Returns:
-            str: Reconstructed document content, or None if no points were found.
+            DocumentBase|None: Reconstructed document, or None if no points were found.
         """
         points = await self.do_fetch_points(
             filters=[
@@ -654,7 +655,7 @@ class RAGClientInterface(ClientInterface):
                 {"key": "dms_doc_id", "match": {"value": dms_doc_id}},
                 {"key": "owner_id",   "match": {"value": owner_id}},
             ],
-            include_fields=["chunk_index", "chunk_text"],
+            include_fields=True,
             with_vector=False,
         )
         if not points:
@@ -674,4 +675,21 @@ class RAGClientInterface(ClientInterface):
                 overlap_prefix_len = len(originals[i - 1][-chunk_overlap:]) + 1  # +1 for "\n"
                 originals.append(stored[overlap_prefix_len:])
 
-        return "\n".join(originals)
+        full_content = "\n".join(originals)
+        return DocumentBase(
+            rag_engine=self._get_engine_name(),
+            dms_engine=dms_engine,
+            dms_doc_id=dms_doc_id,
+            dms_owner_id=owner_id,
+            dms_owner_username=points[0].owner_username,
+            point_ids=[p.id for p in points if p.id],
+            title=points[0].title,
+            content=full_content,
+            category_name=points[0].category_name,
+            dms_category_id=points[0].category_id,
+            type_name=points[0].type_name,
+            dms_type_id=points[0].type_id,
+            label_names=points[0].label_names,
+            dms_label_ids=points[0].label_ids,
+            created=points[0].created,
+        )

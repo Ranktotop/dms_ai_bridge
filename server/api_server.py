@@ -1,4 +1,4 @@
-"""FastAPI application entry point for dms_ai_bridge Phase III."""
+"""FastAPI application entry point for dms_ai_bridge."""
 
 import logging as std_logging
 import os
@@ -15,19 +15,20 @@ from shared.clients.dms.DMSClientInterface import DMSClientInterface
 from shared.clients.rag.RAGClientInterface import RAGClientInterface
 from shared.clients.llm.LLMClientInterface import LLMClientInterface
 from shared.clients.cache.CacheClientInterface import CacheClientInterface
+from shared.clients.prompt.PromptClientInterface import PromptClientInterface
 from shared.clients.cache.CacheClientManager import CacheClientManager
 from shared.clients.dms.DMSClientManager import DMSClientManager
 from shared.clients.rag.RAGClientManager import RAGClientManager
 from shared.clients.llm.LLMClientManager import LLMClientManager
+from shared.clients.prompt.PromptClientManager import PromptClientManager
 from shared.clients.ClientInterface import ClientInterface
 from services.dms_rag_sync.SyncService import SyncService
 from services.rag_search.SearchService import SearchService
 from server.routers.HealthRouter import router as health_router
 from server.routers.WebhookRouter import router as webhook_router
 from server.routers.QueryRouter import router as query_router
-from server.routers.ChatRouter import router as chat_router
+from server.routers.ToolsRouter import router as tools_router
 from server.user_mapping.UserMappingService import UserMappingService
-from services.agent.AgentService import AgentService
 
 logging = setup_logging()
 app_version = os.getenv("APP_VERSION", "unknown")
@@ -50,8 +51,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     dms_clients = DMSClientManager(helper_config=app.state.helper_config).get_clients()
     rag_clients = RAGClientManager(helper_config=app.state.helper_config).get_clients()
     llm_client = LLMClientManager(helper_config=app.state.helper_config).get_client()
+    prompt_client = PromptClientManager(helper_config=app.state.helper_config).get_client()
     cache_client = CacheClientManager(helper_config=app.state.helper_config).get_client()
-    _clients :list[ClientInterface] = [*dms_clients, *rag_clients, llm_client, cache_client]
+    _clients: list[ClientInterface] = [*dms_clients, *rag_clients, llm_client, prompt_client, cache_client]
 
     logging.info("Booting all clients...")
     for client in _clients:
@@ -60,7 +62,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.rag_clients = rag_clients
     app.state.llm_client = llm_client
     app.state.cache_client = cache_client
-    await check_connections(dms_clients, rag_clients, llm_client, cache_client)
+    app.state.prompt_client = prompt_client
+    await check_connections(dms_clients, rag_clients, llm_client, prompt_client, cache_client)
     logging.info("All clients booted successfully.", color="green")
 
     logging.info("Loading all services...")
@@ -76,13 +79,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         rag_clients=rag_clients,
         llm_client=llm_client,
         cache_client=cache_client,
+        dms_clients=dms_clients
     )
     app.state.user_mapping_service = UserMappingService()
-    app.state.agent_service = AgentService(
-        helper_config=app.state.helper_config,
-        search_service=app.state.search_service,
-        llm_client=llm_client,
-    )
     logging.info("All services loaded successfully.", color="green")
 
     # while the app is running...
@@ -90,7 +89,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # when the app shuts down, close all client connections
     logging.info("Shutting down — closing all clients...")
-    for client in [*dms_clients, *rag_clients, llm_client]:
+    for client in [*dms_clients, *rag_clients, llm_client, prompt_client, cache_client]:
         await client.close()
     await cache_client.close()
     logging.info("All clients closed.")
@@ -101,7 +100,7 @@ app = FastAPI(
     description=(
         "Intelligent middleware between Document Management Systems (e.g. Paperless-ngx) "
         "and AI frontends (OpenWebUI, AnythingLLM) via semantic search. "
-        "Documents are indexed into a vector database and served via POST /query. "
+        "Documents are indexed into a vector database and served via POST /query and POST /tools. "
         "Incremental sync is triggered via POST /webhook/document."
     ),
     version=app_version,
@@ -119,13 +118,14 @@ app.add_middleware(
 app.include_router(health_router)
 app.include_router(webhook_router)
 app.include_router(query_router)
-app.include_router(chat_router)
+app.include_router(tools_router)
 
 
 async def check_connections(
     dms_clients: list[DMSClientInterface],
     rag_clients: list[RAGClientInterface],
     llm_client: LLMClientInterface,
+    prompt_client: PromptClientInterface,
     cache_client: CacheClientInterface,
 ) -> None:
     """Check connectivity to all configured backends on startup.
@@ -140,31 +140,38 @@ async def check_connections(
         result = await client.do_healthcheck()
         if not result.is_success:
             raise Exception(
-                f"DMS client '{client.get_engine_name()}' is not reachable "
-                f"(status {result.status_code}). Cannot serve queries."
+                "DMS client '%s' is not reachable (status %d). Cannot serve queries."
+                % (client.get_engine_name(), result.status_code)
             )
 
     for client in rag_clients:
         result = await client.do_healthcheck()
         if not result.is_success:
             raise Exception(
-                f"RAG client '{client.get_engine_name()}' is not reachable "
-                f"(status {result.status_code}). Cannot serve queries."
+                "RAG client '%s' is not reachable (status %d). Cannot serve queries."
+                % (client.get_engine_name(), result.status_code)
             )
 
     result = await llm_client.do_healthcheck()
     if not result.is_success:
         raise Exception(
-                f"LLM client '{llm_client.get_engine_name()}' is not reachable "
-                f"(status {result.status_code}). Cannot serve queries."
-            )
+            "LLM client '%s' is not reachable (status %d). Cannot serve queries."
+            % (llm_client.get_engine_name(), result.status_code)
+        )
+
+    result = await prompt_client.do_healthcheck()
+    if not result.is_success:
+        logging.warning(
+            "Prompt client '%s' is not reachable. Only fallback prompting will be available.",
+            prompt_client.get_engine_name(),
+        )
 
     result = await cache_client.do_healthcheck()
     if not result.is_success:
         raise Exception(
-                f"Cache client '{cache_client.get_engine_name()}' is not reachable "
-                f"(status {result.status_code}). Cannot serve queries."
-            )
+            "Cache client '%s' is not reachable (status %d). Cannot serve queries."
+            % (cache_client.get_engine_name(), result.status_code)
+        )
 
 
 if __name__ == "__main__":

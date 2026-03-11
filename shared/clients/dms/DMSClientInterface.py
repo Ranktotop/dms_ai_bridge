@@ -577,6 +577,18 @@ class DMSClientInterface(ClientInterface):
         """
         pass
 
+    @abstractmethod
+    async def do_delete_document(self, document_id: int) -> bool:
+        """Delete a document from the DMS backend.
+
+        Args:
+            document_id: The DMS document ID to delete.
+
+        Returns:
+            True on success.
+        """
+        pass
+
     async def do_create_correspondent(self, name: str) -> int:
         """Create a new correspondent in the DMS backend.
 

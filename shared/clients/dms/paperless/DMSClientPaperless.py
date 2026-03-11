@@ -140,6 +140,9 @@ class DMSClientPaperless(DMSClientInterface):
     def _get_endpoint_update_document(self, document_id: int) -> str:
         return "/api/documents/%d/" % document_id
 
+    def _get_endpoint_delete_document(self, document_id: int) -> str:
+        return "/api/documents/%d/" % document_id
+
     ##########################################
     ############# PAYLOAD HOOKS ##############
     ##########################################
@@ -304,6 +307,15 @@ class DMSClientPaperless(DMSClientInterface):
             "Paperless-ngx task %s for '%s' did not complete within %.0f seconds"
             % (task_uuid, file_name, _TASK_POLL_TIMEOUT_S)
         )
+
+    async def do_delete_document(self, document_id: int) -> bool:
+        """Delete a document from Paperless-ngx."""
+        await self.do_request(
+            method="DELETE",
+            endpoint=self._get_endpoint_delete_document(document_id),
+            raise_on_error=True,
+        )
+        return True
 
     ##########################################
     ########### RESPONSE PARSER ##############
