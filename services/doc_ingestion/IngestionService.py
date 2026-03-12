@@ -68,10 +68,12 @@ class IngestionService:
             if batch_size > 0
             else [file_paths]
         )
+        overall_documents_count = len(file_paths)
+        current_processed_documents_count = 0
         for batch in document_batches:
-            await self._ingest_batch(batch, root_path)
+            current_processed_documents_count = await self._ingest_batch(batch, root_path, overall_documents_count, current_processed_documents_count)
 
-    async def _ingest_batch(self, file_paths: list[str], root_path: str) -> None:
+    async def _ingest_batch(self, file_paths: list[str], root_path: str, overall_documents_count: int = -1, current_processed_documents_count:int = 0) -> int:
         """Run one complete batch for the given file paths.
 
         Order of operations:
@@ -84,21 +86,39 @@ class IngestionService:
           6. Load tags (LLM chat).
           7. Update DMS document with full metadata.
 
+        Args:
+            file_paths (list[str]): Absolute file paths for this batch.
+            root_path (str): Root scan directory (used for relative path calculation).
+            overall_documents_count (int): Total number of documents being ingested across all batches (for logging context).
+            current_processed_documents_count (int): Number of documents processed in previous batches (for logging context).
+
+        Returns:
+            int: The number of processed documents overall.
+
         If any step after the initial upload fails, the already-uploaded document is
         deleted from the DMS and its cache entry is removed (rollback).
         """
 
-        # ── Step 0: hash check + boot ──────────────────────────────────────────
-        booted: list[tuple[Document, str]] = []  # (doc, cache_key)
+        # sanitize counter values so the progress prefix is always meaningful
+        if overall_documents_count < 1:
+            overall_documents_count = len(file_paths)
+        if current_processed_documents_count < 0 or current_processed_documents_count >= overall_documents_count:
+            current_processed_documents_count = 0
 
-        for file_path in file_paths:
+        # ── Step 0: hash check + boot ──────────────────────────────────────────
+        # doc_idx tracks the 1-based global position across all batches for logging
+        booted: list[tuple[Document, str, int]] = []  # (doc, cache_key, doc_idx)
+
+        for batch_idx, file_path in enumerate(file_paths):
+            doc_idx = current_processed_documents_count + batch_idx + 1
+            progress = self._progress_prefix(doc_idx, overall_documents_count)
             with open(file_path, "rb") as f:
                 file_bytes = f.read()
             file_hash = hashlib.sha256(file_bytes).hexdigest()
             cache_key = "%s:%s" % (KEY_INGESTION_FILE, file_hash)
             cached_doc_id = await self._cache_client.do_get(cache_key)
             if cached_doc_id is not None:
-                self.logging.info("Skipping '%s': already ingested (doc_id=%s).", file_path, cached_doc_id, color="blue")
+                self.logging.info("%s Skipping '%s': already ingested (doc_id=%s).", progress, file_path, cached_doc_id, color="blue")
                 continue
 
             doc = Document(
@@ -116,47 +136,52 @@ class IngestionService:
             )
             try:
                 doc.boot()
-                booted.append((doc, cache_key))
+                self.logging.info("%s Booted '%s'.", progress, file_path)
+                booted.append((doc, cache_key, doc_idx))
             except DocumentPathValidationError as e:
-                self.logging.warning("Skipping '%s': %s", file_path, e, color="yellow")
+                self.logging.warning("%s Skipping '%s': %s", progress, file_path, e, color="yellow")
             except DocumentValidationError as e:
-                self.logging.error("Skipping '%s': %s", file_path, e, color="red")
+                self.logging.error("%s Skipping '%s': %s", progress, file_path, e, color="red")
             except Exception as e:
-                self.logging.error("Failed to boot document '%s': %s", file_path, e)
+                self.logging.error("%s Failed to boot document '%s': %s", progress, file_path, e)
 
         # ── Step 1: upload — early gate before any expensive processing ────────
-        uploaded: list[tuple[Document, int, str]] = []  # (doc, doc_id, cache_key)
-        for doc, cache_key in booted:
-            doc_id = await self._upload_document(doc, cache_key)
+        uploaded: list[tuple[Document, int, str, int]] = []  # (doc, doc_id, cache_key, doc_idx)
+        for doc, cache_key, doc_idx in booted:
+            progress = self._progress_prefix(doc_idx, overall_documents_count)
+            doc_id = await self._upload_document(doc, cache_key, progress)
             if doc_id is None:
                 doc.cleanup()
                 continue
-            uploaded.append((doc, doc_id, cache_key))
+            uploaded.append((doc, doc_id, cache_key, doc_idx))
 
         # ── Phase 1: load content ──────────────────────────────────────────────
-        content_docs: list[tuple[Document, int, str]] = []
-        for doc, doc_id, cache_key in uploaded:
+        content_docs: list[tuple[Document, int, str, int]] = []
+        for doc, doc_id, cache_key, doc_idx in uploaded:
+            progress = self._progress_prefix(doc_idx, overall_documents_count)
             try:
+                self.logging.info("%s Loading content for '%s'.", progress, doc.get_source_file(True))
                 await doc.load_content()
-                content_docs.append((doc, doc_id, cache_key))
+                content_docs.append((doc, doc_id, cache_key, doc_idx))
             except Exception as e:
-                self.logging.error("Failed to load content for '%s': %s", doc.get_source_file(True), e)
+                self.logging.error("%s Failed to load content for '%s': %s", progress, doc.get_source_file(True), e)
                 await self._rollback_document(doc_id, cache_key)
                 doc.cleanup()
 
         # ── Phase 2: format content ────────────────────────────────────────────
-        formatted_docs: list[tuple[Document, int, str]] = []
-        for doc, doc_id, cache_key in content_docs:
+        formatted_docs: list[tuple[Document, int, str, int]] = []
+        for doc, doc_id, cache_key, doc_idx in content_docs:
+            progress = self._progress_prefix(doc_idx, overall_documents_count)
             try:
                 await doc.format_content()
-                formatted_docs.append((doc, doc_id, cache_key))
+                formatted_docs.append((doc, doc_id, cache_key, doc_idx))
             except Exception as e:
-                self.logging.error("Failed to format content for '%s': %s", doc.get_source_file(True), e)
+                self.logging.error("%s Failed to format content for '%s': %s", progress, doc.get_source_file(True), e)
                 await self._rollback_document(doc_id, cache_key)
                 doc.cleanup()
 
         # ── Phase 3: load metadata ─────────────────────────────────────────────
-        meta_docs: list[tuple[Document, int, str]] = []
+        meta_docs: list[tuple[Document, int, str, int]] = []
         new_document_types: list[str] = []
         new_document_types_lc: list[str] = []
         new_correspondents: list[str] = []
@@ -164,13 +189,15 @@ class IngestionService:
         new_tags: list[str] = []
         new_tags_lc: list[str] = []
 
-        for doc, doc_id, cache_key in formatted_docs:
+        for doc, doc_id, cache_key, doc_idx in formatted_docs:
+            progress = self._progress_prefix(doc_idx, overall_documents_count)
             try:
+                self.logging.info("%s Extracting metadata for '%s'.", progress, doc.get_source_file(True))
                 await doc.load_metadata(
                     additional_doc_types=new_document_types,
                     additional_correspondents=new_correspondents,
                     additional_tags=new_tags)
-                meta_docs.append((doc, doc_id, cache_key))
+                meta_docs.append((doc, doc_id, cache_key, doc_idx))
 
                 # Accumulate hints for subsequent documents in the batch
                 meta = doc.get_metadata()
@@ -185,34 +212,39 @@ class IngestionService:
                         new_tags.append(tag)
                         new_tags_lc.append(tag.lower())
             except Exception as e:
-                self.logging.error("Failed to load metadata for '%s': %s", doc.get_source_file(True), e)
+                self.logging.error("%s Failed to load metadata for '%s': %s", progress, doc.get_source_file(True), e)
                 await self._rollback_document(doc_id, cache_key)
                 doc.cleanup()
 
         # ── Phase 4: load tags ─────────────────────────────────────────────────
-        tagged_docs: list[tuple[Document, int, str]] = []
-        for doc, doc_id, cache_key in meta_docs:
+        tagged_docs: list[tuple[Document, int, str, int]] = []
+        for doc, doc_id, cache_key, doc_idx in meta_docs:
+            progress = self._progress_prefix(doc_idx, overall_documents_count)
             try:
+                self.logging.info("%s Extracting tags for '%s'.", progress, doc.get_source_file(True))
                 await doc.load_tags(additional_tags=new_tags)
-                tagged_docs.append((doc, doc_id, cache_key))
+                tagged_docs.append((doc, doc_id, cache_key, doc_idx))
                 for tag in doc.get_tags():
                     if tag.lower() not in new_tags_lc:
                         new_tags.append(tag)
                         new_tags_lc.append(tag.lower())
             except Exception as e:
-                self.logging.error("Failed to load tags for '%s': %s", doc.get_source_file(True), e)
+                self.logging.error("%s Failed to load tags for '%s': %s", progress, doc.get_source_file(True), e)
                 await self._rollback_document(doc_id, cache_key)
                 doc.cleanup()
 
         # ── Phase 5: update DMS metadata ──────────────────────────────────────
-        for doc, doc_id, cache_key in tagged_docs:
+        for doc, doc_id, cache_key, doc_idx in tagged_docs:
+            progress = self._progress_prefix(doc_idx, overall_documents_count)
             try:
-                await self._update_document(doc_id, doc)
+                await self._update_document(doc_id, doc, progress)
             except Exception as e:
-                self.logging.error("Failed to update document id=%d ('%s'): %s", doc_id, doc.get_source_file(True), e)
+                self.logging.error("%s Failed to update document id=%d ('%s'): %s", progress, doc_id, doc.get_source_file(True), e)
                 await self._rollback_document(doc_id, cache_key)
             finally:
                 doc.cleanup()
+
+        return current_processed_documents_count + len(file_paths)
 
     ##########################################
     ################# DMS ####################
@@ -234,23 +266,26 @@ class IngestionService:
         except Exception as e:
             self.logging.error("Rollback: failed to remove cache entry '%s': %s", cache_key, e)
 
-    async def _upload_document(self, document: Document, cache_key: str) -> int | None:
+    async def _upload_document(self, document: Document, cache_key: str, progress: str = "") -> int | None:
         """
         Uploads the given document to dms and saves it to the cache
 
         Args:
             document: The Document instance to upload.
             cache_key: The cache key under which to store the document ID.
+            progress: Optional progress prefix string (e.g. "[12/100]") for log messages.
 
         Returns:
             The DMS document ID if the upload was successful, or None if the document was skipped (e.g., due to duplication) or if an error occurred.
         """
-        # Upload original file to dms (file_bytes already read above for hash check)        
+        # Upload original file to dms (file_bytes already read above for hash check)
         # Get the required data
         file_name = document.get_source_file(filename_only=True)
         file_path = document.get_source_file()
         file_bytes = document.get_file_bytes()
+        prefix = ("%s " % progress) if progress else ""
         try:
+            self.logging.info("%sUploading '%s' to DMS.", prefix, file_path)
             doc_id = await self._dms_client.do_upload_document(
                 file_bytes=file_bytes,
                 file_name=file_name,
@@ -260,28 +295,29 @@ class IngestionService:
             dup_id: int | None = e.args[0] if e.args else None
             if dup_id is not None:
                 self.logging.warning(
-                    "Skipping '%s': duplicate of DMS doc id=%d. Caching hash.",
-                    file_path, dup_id, color="yellow",
+                    "%sSkipping '%s': duplicate of DMS doc id=%d. Caching hash.",
+                    prefix, file_path, dup_id, color="yellow",
                 )
                 await self._cache_client.do_set(cache_key, str(dup_id))
             else:
-                self.logging.warning("Skipping '%s': already exists in DMS.", file_path)
+                self.logging.warning("%sSkipping '%s': already exists in DMS.", prefix, file_path)
             return None
         except Exception as e:
-            self.logging.error("Upload failed for '%s': %s", file_path, e)
-            return None        
+            self.logging.error("%sUpload failed for '%s': %s", prefix, file_path, e)
+            return None
 
         # Store hash after confirmed upload so the file is skipped on future runs
-        await self._cache_client.do_set(cache_key, str(doc_id))        
+        await self._cache_client.do_set(cache_key, str(doc_id))
         return doc_id
 
-    async def _update_document(self, dms_doc_id: int, document: Document) -> None:
+    async def _update_document(self, dms_doc_id: int, document: Document, progress: str = "") -> None:
         """
         Update a previously uploaded DMS document with full extracted metadata.
 
         Args:
             dms_doc_id: The DMS document ID obtained from the initial upload step.
             document: A Document instance that has completed all analysis phases.
+            progress: Optional progress prefix string (e.g. "[12/100]") for log messages.
 
         Raises:
             Exception: Any error encountered while resolving DMS entities or
@@ -334,6 +370,20 @@ class IngestionService:
             ),
         )
 
+        prefix = ("%s " % progress) if progress else ""
         self.logging.info(
-            "File '%s' ingested successfully -> DMS document id=%d", file_path, dms_doc_id
+            "%sFile '%s' ingested successfully -> DMS document id=%d", prefix, file_path, dms_doc_id
         )
+
+    ##########################################
+    ############# HELPERS ####################
+    ##########################################
+
+    def _progress_prefix(self, current: int, total: int) -> str:
+        """Return a zero-padded progress prefix like '[012/100]' for log messages.
+
+        Zero-padding the current index to match the width of the total keeps log
+        lines aligned when the total reaches three or more digits.
+        """
+        width = len(str(total))
+        return "[%s/%d]" % (str(current).zfill(width), total)
