@@ -34,7 +34,7 @@ class AgentThoughtEvent(AgentEvent):
     type: Literal["thought"] = "thought"
 
     def log(self, logger: ColorLogger) -> None:
-        logger.debug("[iter=%d] Thought: %s", self.iteration, self.thought, color="cyan")
+        logger.info("[iter=%d] Thought: %s", self.iteration, self.thought, color="cyan")
 
 
 @dataclass
@@ -45,7 +45,7 @@ class AgentStepEvent(AgentEvent):
     type: Literal["step"] = "step"
 
     def log(self, logger: ColorLogger) -> None:
-        logger.debug("[iter=%d] Step: %s", self.iteration, self.tool_name, color="blue")
+        logger.info("[iter=%d] Step: %s", self.iteration, self.tool_name, color="blue")
 
 
 @dataclass
@@ -55,7 +55,7 @@ class AgentRetryEvent(AgentEvent):
     type: Literal["retry"] = "retry"
 
     def log(self, logger: ColorLogger) -> None:
-        logger.debug("[iter=%d] Retry: %s", self.iteration, self.reason, color="yellow")
+        logger.info("[iter=%d] Retry: %s", self.iteration, self.reason, color="yellow")
 
 
 @dataclass
@@ -65,7 +65,7 @@ class AgentAnswerEvent(AgentEvent):
     type: Literal["answer"] = "answer"
 
     def log(self, logger: ColorLogger) -> None:
-        logger.debug("Answer (%d citation(s)): %s", len(self.citations), self.text[:120], color="green")
+        logger.info("Answer (%d citation(s)): %s", len(self.citations), self.text[:120], color="green")
 
 
 @dataclass

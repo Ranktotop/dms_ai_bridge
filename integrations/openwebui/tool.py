@@ -1,28 +1,30 @@
 """
-title: DMS AI Bridge
-author: Marc Meese
-version: 1.0.0
+DMS AI Bridge — OpenWebUI Tool
 
-DMS AI Bridge — OpenWebUI Pipe Function
+Deploy this file in OpenWebUI under Admin → Tools.
+Attach the tool to any model.
 
-Deploy this file in OpenWebUI under Admin → Functions.
-The bridge runs the full ReAct reasoning loop internally; this pipe only
-streams the results back to OpenWebUI and returns the final answer verbatim.
-Citations are surfaced as native OpenWebUI source chips.
+The bridge runs the full ReAct reasoning loop internally; this tool only
+streams the results back to OpenWebUI via the event emitter and returns
+the final answer text. Citations are surfaced as native OpenWebUI source chips.
+
+The model decides when to call this tool — normal chat messages that are
+unrelated to documents are handled directly by the model without invoking
+the bridge.
 
 Self-contained: no imports from dms_ai_bridge.
 """
 import json
 import httpx
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
-class Pipe:
+class Tools:
     class Valves(BaseModel):
-        BASE_URL: str = Field(default="http://dms-bridge:8000", description="Base URL of the DMS AI Bridge server.")
-        API_KEY: str = Field(default="", description="Authentication key (X-Api-Key header).")
-        LIMIT: int = Field(default=10, description="Maximum number of documents to retrieve per search.")
-        TIMEOUT: float = Field(default=120.0, description="Request timeout in seconds.")
+        BASE_URL: str = "http://dms-bridge:8000"
+        API_KEY: str = ""
+        LIMIT: int = 10
+        TIMEOUT: float = 120.0
 
     def __init__(self) -> None:
         self.valves = self.Valves()
@@ -57,60 +59,52 @@ class Pipe:
         })
 
     ##########################################
-    ############### CORE #####################
+    ################ TOOL ####################
     ##########################################
 
-    async def pipe(
+    async def search_documents(
         self,
-        body: dict,
+        query: str,
         __user__: dict = {},
         __event_emitter__=None,
+        __messages__: list = [],
     ) -> str:
-        """Main entry point called by OpenWebUI on every user message.
+        """Search and answer questions about documents stored in the personal document archive.
 
-        Delegates the full ReAct reasoning loop to the DMS AI Bridge.
-        The return value is displayed verbatim — no second LLM pass occurs
-        inside OpenWebUI, so citations appended here are always visible.
+        Use this tool whenever the user asks about documents, invoices, contracts,
+        letters, receipts, or any files stored in their document management system.
+        Also use this for questions about specific content, dates, amounts, or names
+        found in documents.
 
         Args:
-            body:             OpenWebUI request body (contains 'messages').
-            __user__:         Injected user dict from OpenWebUI.
-            __event_emitter__: Injected event emitter for status/citation events.
+            query: The user's natural language question about their documents.
 
         Returns:
-            The agent's final answer, or an error string on failure.
+            str: The agent's answer based on the relevant documents found.
         """
-        messages: list[dict] = body.get("messages", [])
-        if not messages:
-            return "Error: no messages provided."
-
-        # the last user message is the current query — everything before is history
-        query = messages[-1].get("content", "").strip()
-        if not query:
-            return "Error: empty query."
+        await self._emit_status(__event_emitter__, "🚀 Starte DMS AI Agent…", done=False)
 
         # use email as user identifier — easier to configure in user_mapping.yml than an opaque UUID
         user_id = str(__user__.get("email", ""))
 
-        # strip the current query from history so the bridge doesn't see it twice
+        # convert OpenWebUI's __messages__ to the OpenAI role/content format the bridge expects;
+        # exclude the current turn (last user message) — it is sent as 'query'
         chat_history = [
             {"role": m.get("role", "user"), "content": m.get("content", "")}
-            for m in messages[:-1]
+            for m in (__messages__ or [])[:-1]
         ]
 
-        await self._emit_status(__event_emitter__, "🚀 Starte DMS AI Agent…", done=False)
-
         url = "%s/chat/openwebui/stream" % self._base()
-        body_payload = {
+        body = {
             "user_id": user_id,
-            "query": query,
+            "query": query.strip(),
             "tool_context": {"limit": self.valves.LIMIT},
             "chat_history": chat_history,
         }
 
         try:
             async with httpx.AsyncClient(timeout=self.valves.TIMEOUT) as client:
-                async with client.stream("POST", url, json=body_payload, headers=self._headers()) as response:
+                async with client.stream("POST", url, json=body, headers=self._headers()) as response:
                     response.raise_for_status()
                     return await self._consume_stream(response, __event_emitter__)
         except httpx.HTTPStatusError as e:
@@ -120,7 +114,11 @@ class Pipe:
             await self._emit_status(__event_emitter__, "Fehler: %s" % str(e), done=True)
             return "Error communicating with DMS bridge: %s" % str(e)
 
-    async def _consume_stream(self, response: httpx.Response, emitter) -> str:
+    ##########################################
+    ############# STREAM #####################
+    ##########################################
+
+    async def _consume_stream(self, response, emitter) -> str:
         """Read the SSE stream from the bridge and dispatch each typed event.
 
         Thought/step/retry events are forwarded as OpenWebUI status updates.
@@ -180,6 +178,7 @@ class Pipe:
                     await self._emit_status(emitter, "✅ Suche abgeschlossen.", done=True)
 
                 elif event_type == "error":
-                    raise RuntimeError(event.get("message", "Agent returned an error."))
+                    await self._emit_status(emitter, "❌ Fehler aufgetreten.", done=True)
+                    return "❌ %s" % event.get("message", "Agent returned an error.")
 
         return answer
