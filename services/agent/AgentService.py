@@ -152,6 +152,8 @@ class AgentService:
         #fetch the names of all registered tools
         known_tools = self._tool_manager.get_tool_names()
         accumulated_citations: list[CitationRef] = []
+        # track executed (action, args) pairs to detect and correct stuck loops
+        executed_tool_calls: list[tuple[str, dict]] = []
 
         try:
             # get the system prompt messages
@@ -232,6 +234,46 @@ class AgentService:
             if tool_call.thought:
                 yield self._send_event(AgentThoughtEvent(thought=tool_call.thought, iteration=iteration))
 
+            # guard against stuck loops: if the model picked the same tool+args it already ran,
+            # inject a stern correction and give it one more chance before continuing
+            if tool_call.action != "final_answer":
+                is_repeated = any(
+                    prev_action == tool_call.action and prev_args == tool_call.args
+                    for prev_action, prev_args in executed_tool_calls
+                )
+                if is_repeated:
+                    correction = (
+                        "You already called '%s' with the same arguments in a previous step. "
+                        "Do NOT repeat this call. "
+                        "Use a DIFFERENT tool or different arguments to make progress." % tool_call.action
+                    )
+                    yield self._send_event(AgentRetryEvent(
+                        reason="Detected repeated tool call — correcting...", iteration=iteration
+                    ))
+                    messages = self._trim_to_context_limit(messages + [
+                        PromptConfigMessage(role="assistant", content=json.dumps({
+                            "thought": tool_call.thought,
+                            "action": tool_call.action,
+                            "args": tool_call.args,
+                        })),
+                        PromptConfigMessage(role="user", content=correction),
+                    ])
+                    try:
+                        corrected_raw = await self._llm_client.do_chat(messages=[m.to_llm_message_dict() for m in messages])
+                    except Exception as e:
+                        yield self._send_event(AgentErrorEvent(message="LLM call failed on loop correction: %s" % str(e)))
+                        return
+                    corrected = self._parser.parse(corrected_raw, known_tools)
+                    # only swap if the correction produced a valid, non-repeated call
+                    if corrected is not None and not any(
+                        p == corrected.action and g == corrected.args
+                        for p, g in executed_tool_calls
+                    ):
+                        tool_call = corrected
+                    # whether corrected or not, emit the updated thought so the user can follow along
+                    if tool_call.thought:
+                        yield self._send_event(AgentThoughtEvent(thought=tool_call.thought, iteration=iteration))
+
             # if the llm thinks the answer is the final answer, we send it to the clients and end the loop
             if tool_call.action == "final_answer":         
                 # take the saved citations if there are any and deduplicate them       
@@ -244,6 +286,9 @@ class AgentService:
             # at first, we inform the user what we're doing here
             hint = self._tool_manager.get_step_hint(tool_call.action)
             yield self._send_event(AgentStepEvent(tool_name=tool_call.action, hint=hint, iteration=iteration))
+
+            # record this call so we can detect unhelpful repetitions in later iterations
+            executed_tool_calls.append((tool_call.action, tool_call.args))
 
             # run the tool and get the result
             tool_result = await self._tool_manager.validate_and_execute(

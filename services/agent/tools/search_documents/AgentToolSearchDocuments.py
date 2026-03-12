@@ -7,7 +7,6 @@ from services.rag_search.SearchService import SearchService
 from services.rag_search.helper.IdentityHelper import IdentityHelper
 from services.agent.tools.AgentToolInterface import AgentToolInterface
 from services.agent.tools.AgentToolResult import AgentToolResult
-from services.agent.models.AgentEvent import CitationRef
 
 
 class AgentToolSearchDocuments(AgentToolInterface):
@@ -80,42 +79,25 @@ class AgentToolSearchDocuments(AgentToolInterface):
             return AgentToolResult(observation="No documents found for query: '%s'." % query)
 
         lines: list[str] = ["Found %d document(s):" % len(points)]
-        citations: list[CitationRef] = []
         # give each point equal chars
         chars_per_point = max_chars // len(points)
-        view_urls = {}
+        # track doc_ids already added to avoid duplicate lines for the same doc
+        seen_doc_ids: set[str] = set()
 
         # iterate the points
         for i, point in enumerate(points, start=1):
             doc_id = point.dms_doc_id or ""
             title = point.title or "(no title)"
             score = point.score or 0.0
-            # create the obersavation line for this point
+            # create the observation line for this point
             base_line = "[%d] doc_id=%s | dms_engine=%s | title=%s | score=%.3f" % (i, doc_id, point.dms_engine or "", title, score)
             # strip the content to fit within the char limit
-            chars_left = max(chars_per_point - len(base_line) - 1, 1) # -1 for newline, min 1 char            
+            chars_left = max(chars_per_point - len(base_line) - 1, 1)  # -1 for newline, min 1 char
             snippet = (point.chunk_text or "")[:chars_left]
-            base_line = base_line + "\n" + snippet
-            # add to the list
-            lines.append(base_line)
-            # add the view url as citation.
-            url_key = f"{point.dms_engine}:{doc_id}"
-            # if we already fetched for this key, we can continue
-            if url_key in view_urls:
-                continue
+            lines.append(base_line + "\n" + snippet)
+            seen_doc_ids.add(doc_id)
 
-            # if not, fetch...
-            view_url = self._search_service.get_document_url_by_id(dms_engine=point.dms_engine, doc_id=doc_id)
-            view_urls[url_key] = view_url
-            
-            # and add as citation
-            citations.append(
-                CitationRef(
-                    dms_doc_id=doc_id,
-                    dms_engine=point.dms_engine,
-                    title=title,
-                    view_url=view_url,
-                )
-            )
-
-        return AgentToolResult(observation="\n".join(lines), citations=citations)
+        # search is an exploration step — citations are only added when the agent explicitly
+        # fetches a document via get_document_details or get_document_full. Returning all
+        # search hits as citations would flood the UI with unrelated document links.
+        return AgentToolResult(observation="\n".join(lines), citations=[])
