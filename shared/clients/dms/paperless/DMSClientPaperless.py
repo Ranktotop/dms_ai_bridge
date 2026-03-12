@@ -208,7 +208,7 @@ class DMSClientPaperless(DMSClientInterface):
         if created_date:
             data["created_date"] = created_date
 
-        self.logging.info("Uploading document '%s' to Paperless-ngx...", file_name)
+        self.logging.debug("Uploading document '%s' to Paperless-ngx...", file_name)
         response = await self.do_request(
             method="POST",
             endpoint=self._get_endpoint_upload(),
@@ -231,7 +231,7 @@ class DMSClientPaperless(DMSClientInterface):
             return doc_id
         else:
             task_uuid = str(result)
-            self.logging.info(
+            self.logging.debug(
                 "Document '%s' accepted (task_id=%s), waiting for processing...",
                 file_name, task_uuid,
             )
