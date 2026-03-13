@@ -24,6 +24,9 @@ pytz>=2024.1
 # Cache client (Redis)
 redis>=5.0.0
 
+# PostgreSQL DMS backend
+asyncpg>=0.30.0
+
 # Document Ingestion (optional: Vision OCR + file watching)
 pymupdf>=1.24.0
 watchfiles>=0.21.0
