@@ -453,6 +453,8 @@ class SyncService:
                     created=doc.created_date.isoformat() if doc.created_date else None,
                     chunk_text=chunk,
                     content_hash=current_hash,
+                    # already resolved dict[str, str] from DMS — pass through directly
+                    custom_fields=doc.custom_fields,
                 )
                 points.append(PointUpsert(
                     id=_make_point_id(engine, doc.id, chunk_index),
@@ -626,6 +628,12 @@ class SyncService:
             document_types: set[str] = set(existing.get("document_types") or [])
             tags: set[str] = set(existing.get("tags") or [])
 
+            # restore existing per-field value sets so we only add to them, never overwrite
+            existing_cf: dict[str, list[str]] = existing.get("custom_fields") or {}
+            custom_field_options: dict[str, set[str]] = {
+                k: set(v) for k, v in existing_cf.items()
+            }
+
             if doc.correspondent and doc.correspondent.name:
                 correspondents.add(doc.correspondent.name)
             if doc.document_type and doc.document_type.name:
@@ -634,10 +642,16 @@ class SyncService:
                 if tag.name:
                     tags.add(tag.name)
 
+            # accumulate distinct values per custom field name — field_name → {distinct values}
+            for field_name, value in (doc.custom_fields or {}).items():
+                if field_name and value:  # skip empty keys or values
+                    custom_field_options.setdefault(field_name, set()).add(value)
+
             options = {
                 "correspondents": sorted(correspondents),
                 "document_types": sorted(document_types),
                 "tags": sorted(tags),
+                "custom_fields": {k: sorted(v) for k, v in custom_field_options.items()},
             }
             await self._cache_client.do_set_json(cache_key, options)
             self.logging.debug(
@@ -676,6 +690,8 @@ class SyncService:
                     "correspondents": set(),
                     "document_types": set(),
                     "tags": set(),
+                    # field_name → set of distinct string values across all documents
+                    "custom_fields": {},
                 }
             if doc.correspondent and doc.correspondent.name:
                 by_engine_owner[key]["correspondents"].add(doc.correspondent.name)
@@ -685,22 +701,29 @@ class SyncService:
                 if tag.name:
                     by_engine_owner[key]["tags"].add(tag.name)
 
+            # accumulate distinct values per custom field name — field_name → {distinct values}
+            for field_name, value in (doc.custom_fields or {}).items():
+                if field_name and value:  # skip empty keys or values
+                    by_engine_owner[key]["custom_fields"].setdefault(field_name, set()).add(value)
+
         for (engine_name, oid), opts in by_engine_owner.items():
             options = {
                 "correspondents": sorted(opts["correspondents"]),
                 "document_types": sorted(opts["document_types"]),
                 "tags": sorted(opts["tags"]),
+                "custom_fields": {k: sorted(v) for k, v in opts["custom_fields"].items()},
             }
             try:
                 cache_key = "%s:%s:%d" % (KEY_FILTER_OPTIONS, engine_name, oid)
                 await self._cache_client.do_set_json(cache_key, options)
                 self.logging.debug(
                     "Filter cache updated for engine=%s, owner_id=%d: %d correspondents, "
-                    "%d document_types, %d tags.",
+                    "%d document_types, %d tags, %d custom field(s).",
                     engine_name, oid,
                     len(options["correspondents"]),
                     len(options["document_types"]),
                     len(options["tags"]),
+                    len(options["custom_fields"]),
                 )
             except Exception as e:
                 self.logging.warning(

@@ -16,3 +16,5 @@ class DocumentUpdateRequest:
     content: str | None = None
     created_date: str | None = None  # ISO YYYY-MM-DD
     owner_id: int | None = None
+    # field_name → value pairs to set on the document — empty means no custom field update
+    custom_fields: dict[str, str] = field(default_factory=dict)

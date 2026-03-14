@@ -28,6 +28,8 @@ class ToolSearchResult(BaseModel):
     document_type: str | None
     tags: list[str]
     view_url: str | None = None
+    # arbitrary DMS-specific fields (e.g. Paperless custom fields); field_name → value
+    custom_fields: dict[str, str] = {}
 
 
 class ToolSearchResponse(BaseModel):
@@ -38,6 +40,8 @@ class ToolFilterOptionsResponse(BaseModel):
     correspondents: list[str]
     document_types: list[str]
     tags: list[str]
+    # DMS custom field names mapped to their distinct values, sorted; used for filter UIs
+    custom_fields: dict[str, list[str]] = {}
 
 
 class ToolDocumentResponse(BaseModel):
@@ -49,6 +53,8 @@ class ToolDocumentResponse(BaseModel):
     document_type: str | None
     tags: list[str]
     view_url: str | None = None
+    # arbitrary DMS-specific fields (e.g. Paperless custom fields); field_name → value
+    custom_fields: dict[str, str] = {}
 
 
 class ToolDocumentFullResponse(BaseModel):

@@ -10,6 +10,6 @@ class DocumentValidationError(Exception):
 class DocumentPathValidationError(Exception):
     """
     Raised when the path of an document does not fit the minimum requirements for metadata extraction, e.g. missing correspondent.
-    
+
     Callers should log this as WARNING, not ERROR.
     """

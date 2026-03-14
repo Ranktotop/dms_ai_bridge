@@ -31,6 +31,10 @@ asyncpg>=0.30.0
 pymupdf>=1.24.0
 watchfiles>=0.21.0
 
+# Mail Ingestion
+imapclient>=3.0.1
+markdownify>=0.13.0
+
 # Locale-aware date/month name parsing (used by PathTemplateParser)
 babel>=2.14.0
 

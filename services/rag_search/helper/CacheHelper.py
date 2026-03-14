@@ -15,6 +15,8 @@ class RagResponse:
     correspondents: list[str] = field(default_factory=list)
     document_types: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
+    # field_name → sorted list of distinct values across all documents for this owner
+    custom_fields: dict[str, list[str]] = field(default_factory=dict)
 
 class CacheHelper:
     def __init__(self, cache_client: CacheClientInterface, rag_clients: list[RAGClientInterface], config: HelperConfig) -> None:
@@ -98,7 +100,10 @@ class CacheHelper:
             cache_key=key,
             correspondents=cache_result.get("correspondents", []),
             document_types=cache_result.get("document_types", []),
-            tags=cache_result.get("tags", []))
+            tags=cache_result.get("tags", []),
+            # custom_fields was added after the initial cache schema — default to {} for
+            # cache entries written before this field was introduced
+            custom_fields=cache_result.get("custom_fields", {}))
         self.logging.debug("Fetching from cache with key: %s, result: %s", key, result)
         return result
 
@@ -126,7 +131,7 @@ class CacheHelper:
                     {"key": "dms_engine", "match": {"value": dms_engine}},
                     {"key": "owner_id", "match": {"value": owner_id}},
                 ],
-                include_fields=["category_name", "type_name", "label_names"],
+                include_fields=["category_name", "type_name", "label_names", "custom_fields"],
                 with_vector=False,
             )
             for rag_client in self._rag_clients
@@ -142,6 +147,9 @@ class CacheHelper:
             correspondents=set(),
             document_types=set(),
             tags=set())
+        # separate accumulator for custom fields — must be dict[str, set[str]] during
+        # collection because sets deduplicate values; converted to sorted lists at the end
+        custom_field_sets: dict[str, set[str]] = {}
 
         #iterate results from all rag clients
         has_errors = False
@@ -167,11 +175,16 @@ class CacheHelper:
                 for label in point.label_names:
                     if label:
                         result.tags.add(label)
+                # accumulate distinct values per custom field name for filter options
+                for field_name, value in (getattr(point, "custom_fields", None) or {}).items():
+                    if field_name and value:
+                        custom_field_sets.setdefault(field_name, set()).add(value)
 
         #sort the sets and convert to lists for better readability
         result.correspondents = sorted(result.correspondents)
         result.document_types = sorted(result.document_types)
         result.tags = sorted(result.tags)
+        result.custom_fields = {k: sorted(v) for k, v in custom_field_sets.items()}
 
         #upsert to cache if not error occured during fetching from rags
         if not has_errors:
@@ -179,7 +192,8 @@ class CacheHelper:
                 cache_data = {
                     "correspondents": result.correspondents,
                     "document_types": result.document_types,
-                    "tags": result.tags}
+                    "tags": result.tags,
+                    "custom_fields": result.custom_fields}
                 await self._cache_client.do_set_json(result.cache_key, cache_data)
             except Exception as e:
                 self.logging.warning(

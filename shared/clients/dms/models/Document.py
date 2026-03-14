@@ -27,6 +27,8 @@ class DocumentDetails(DocumentBase):
     owner_id : str | None = None
     mime_type: str | None = None
     file_name: str | None = None
+    # raw custom field values keyed by field id (str) — resolved to name→value in fill_cache()
+    custom_field_ids: dict[str, str] = {}
 
 class DocumentHighDetails(DocumentDetails):
     """
@@ -36,6 +38,8 @@ class DocumentHighDetails(DocumentDetails):
     owner: OwnerDetails | None = None
     tags: list[TagDetails] = []
     document_type: DocumentTypeDetails | None = None
+    # resolved custom field values keyed by field name — always a dict, never None
+    custom_fields: dict[str, str] = {}
 
 class DocumentsListResponse(BaseModel):
     """

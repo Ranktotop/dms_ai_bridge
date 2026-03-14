@@ -1,4 +1,4 @@
-"""Core orchestrator for the document ingestion pipeline."""
+"""Core orchestrator for the file ingestion pipeline."""
 import hashlib
 
 from shared.clients.cache.CacheClientInterface import CacheClientInterface, KEY_INGESTION_FILE
@@ -8,11 +8,11 @@ from shared.clients.llm.LLMClientInterface import LLMClientInterface
 from shared.clients.ocr.OCRClientInterface import OCRClientInterface
 from shared.clients.prompt.PromptClientInterface import PromptClientInterface
 from shared.helper.HelperConfig import HelperConfig
-from services.doc_ingestion.helper.Document import Document
-from services.doc_ingestion.Exceptions import DocumentValidationError, DocumentPathValidationError
+from services.ingestion.entities.DocumentFile import DocumentFile
+from services.ingestion.exceptions import DocumentValidationError, DocumentPathValidationError
 from shared.helper.HelperFile import HelperFile
 
-class IngestionService:
+class FileIngestionService:
     """Orchestrates the file ingestion pipeline:
     path parse -> (convert to PDF) -> OCR -> metadata -> DMS upload -> DMS update.
     """
@@ -26,7 +26,7 @@ class IngestionService:
         template: str | None = None,
         default_owner_id: int | None = None,
         ocr_client: OCRClientInterface | None = None,
-        prompt_client: PromptClientInterface|None = None
+        prompt_client: PromptClientInterface | None = None
     ) -> None:
         self._config = helper_config
         self.logging = helper_config.get_logger()
@@ -73,7 +73,7 @@ class IngestionService:
         for batch in document_batches:
             current_processed_documents_count = await self._ingest_batch(batch, root_path, overall_documents_count, current_processed_documents_count)
 
-    async def _ingest_batch(self, file_paths: list[str], root_path: str, overall_documents_count: int = -1, current_processed_documents_count:int = 0) -> int:
+    async def _ingest_batch(self, file_paths: list[str], root_path: str, overall_documents_count: int = -1, current_processed_documents_count: int = 0) -> int:
         """Run one complete batch for the given file paths.
 
         Order of operations:
@@ -107,7 +107,7 @@ class IngestionService:
 
         # ── Step 0: hash check + boot ──────────────────────────────────────────
         # doc_idx tracks the 1-based global position across all batches for logging
-        booted: list[tuple[Document, str, int]] = []  # (doc, cache_key, doc_idx)
+        booted: list[tuple[DocumentFile, str, int]] = []  # (doc, cache_key, doc_idx)
 
         for batch_idx, file_path in enumerate(file_paths):
             doc_idx = current_processed_documents_count + batch_idx + 1
@@ -115,13 +115,13 @@ class IngestionService:
             with open(file_path, "rb") as f:
                 file_bytes = f.read()
             file_hash = hashlib.sha256(file_bytes).hexdigest()
-            cache_key = "%s:%s" % (KEY_INGESTION_FILE, file_hash)
+            cache_key = "%s:%s" % (KEY_INGESTION_FILE, self._dms_client.get_engine_name() + ":" + file_hash)
             cached_doc_id = await self._cache_client.do_get(cache_key)
             if cached_doc_id is not None:
                 self.logging.info("%s Skipping '%s': already ingested (doc_id=%s).", progress, file_path, cached_doc_id, color="blue")
                 continue
 
-            doc = Document(
+            doc = DocumentFile(
                 root_path=root_path,
                 source_file=file_path,
                 working_directory=self._helper_file.generate_tempfolder(path_only=True),
@@ -146,7 +146,7 @@ class IngestionService:
                 self.logging.error("%s Failed to boot document '%s': %s", progress, file_path, e)
 
         # ── Step 1: upload — early gate before any expensive processing ────────
-        uploaded: list[tuple[Document, int, str, int]] = []  # (doc, doc_id, cache_key, doc_idx)
+        uploaded: list[tuple[DocumentFile, int, str, int]] = []  # (doc, doc_id, cache_key, doc_idx)
         for doc, cache_key, doc_idx in booted:
             progress = self._progress_prefix(doc_idx, overall_documents_count)
             doc_id = await self._upload_document(doc, cache_key, progress)
@@ -156,7 +156,7 @@ class IngestionService:
             uploaded.append((doc, doc_id, cache_key, doc_idx))
 
         # ── Phase 1: load content ──────────────────────────────────────────────
-        content_docs: list[tuple[Document, int, str, int]] = []
+        content_docs: list[tuple[DocumentFile, int, str, int]] = []
         for doc, doc_id, cache_key, doc_idx in uploaded:
             progress = self._progress_prefix(doc_idx, overall_documents_count)
             try:
@@ -169,7 +169,7 @@ class IngestionService:
                 doc.cleanup()
 
         # ── Phase 2: format content ────────────────────────────────────────────
-        formatted_docs: list[tuple[Document, int, str, int]] = []
+        formatted_docs: list[tuple[DocumentFile, int, str, int]] = []
         for doc, doc_id, cache_key, doc_idx in content_docs:
             progress = self._progress_prefix(doc_idx, overall_documents_count)
             try:
@@ -181,53 +181,46 @@ class IngestionService:
                 doc.cleanup()
 
         # ── Phase 3: load metadata ─────────────────────────────────────────────
-        meta_docs: list[tuple[Document, int, str, int]] = []
+        meta_docs: list[tuple[DocumentFile, int, str, int]] = []
         new_document_types: list[str] = []
-        new_document_types_lc: list[str] = []
         new_correspondents: list[str] = []
-        new_correspondents_lc: list[str] = []
         new_tags: list[str] = []
-        new_tags_lc: list[str] = []
 
         for doc, doc_id, cache_key, doc_idx in formatted_docs:
             progress = self._progress_prefix(doc_idx, overall_documents_count)
             try:
                 self.logging.info("%s Extracting metadata for '%s'.", progress, doc.get_source_file(True))
-                await doc.load_metadata(
-                    additional_doc_types=new_document_types,
-                    additional_correspondents=new_correspondents,
-                    additional_tags=new_tags)
+                # add previously extracted additionals (used for giving hints to the llm)
+                doc.add_additional_correspondents(new_correspondents)
+                doc.add_additional_document_types(new_document_types)
+                doc.add_additional_tags(new_tags)
+
+                await doc.load_metadata()
                 meta_docs.append((doc, doc_id, cache_key, doc_idx))
 
-                # Accumulate hints for subsequent documents in the batch
-                meta = doc.get_metadata()
-                if meta.document_type and meta.document_type.lower() not in new_document_types_lc:
-                    new_document_types.append(meta.document_type)
-                    new_document_types_lc.append(meta.document_type.lower())
-                if meta.correspondent and meta.correspondent.lower() not in new_correspondents_lc:
-                    new_correspondents.append(meta.correspondent)
-                    new_correspondents_lc.append(meta.correspondent.lower())
-                for tag in (meta.tags or []):
-                    if tag.lower() not in new_tags_lc:
-                        new_tags.append(tag)
-                        new_tags_lc.append(tag.lower())
+                # update the existing values
+                new_correspondents = doc.get_additional_correspondents()
+                new_document_types = doc.get_additional_document_types()
+                new_tags = doc.get_additional_tags()
             except Exception as e:
                 self.logging.error("%s Failed to load metadata for '%s': %s", progress, doc.get_source_file(True), e)
                 await self._rollback_document(doc_id, cache_key)
                 doc.cleanup()
 
         # ── Phase 4: load tags ─────────────────────────────────────────────────
-        tagged_docs: list[tuple[Document, int, str, int]] = []
+        tagged_docs: list[tuple[DocumentFile, int, str, int]] = []
         for doc, doc_id, cache_key, doc_idx in meta_docs:
             progress = self._progress_prefix(doc_idx, overall_documents_count)
             try:
                 self.logging.info("%s Extracting tags for '%s'.", progress, doc.get_source_file(True))
+                # add previously extracted additionals (used for giving hints to the llm)
+                doc.add_additional_tags(new_tags)
+
                 await doc.load_tags(additional_tags=new_tags)
                 tagged_docs.append((doc, doc_id, cache_key, doc_idx))
-                for tag in doc.get_tags():
-                    if tag.lower() not in new_tags_lc:
-                        new_tags.append(tag)
-                        new_tags_lc.append(tag.lower())
+
+                # update the existing values
+                new_tags = doc.get_additional_tags()
             except Exception as e:
                 self.logging.error("%s Failed to load tags for '%s': %s", progress, doc.get_source_file(True), e)
                 await self._rollback_document(doc_id, cache_key)
@@ -266,7 +259,7 @@ class IngestionService:
         except Exception as e:
             self.logging.error("Rollback: failed to remove cache entry '%s': %s", cache_key, e)
 
-    async def _upload_document(self, document: Document, cache_key: str, progress: str = "") -> int | None:
+    async def _upload_document(self, document: DocumentFile, cache_key: str, progress: str = "") -> int | None:
         """
         Uploads the given document to dms and saves it to the cache
 
@@ -310,7 +303,7 @@ class IngestionService:
         await self._cache_client.do_set(cache_key, str(doc_id))
         return doc_id
 
-    async def _update_document(self, dms_doc_id: int, document: Document, progress: str = "") -> None:
+    async def _update_document(self, dms_doc_id: int, document: DocumentFile, progress: str = "") -> None:
         """
         Update a previously uploaded DMS document with full extracted metadata.
 

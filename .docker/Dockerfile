@@ -57,7 +57,8 @@ RUN useradd --create-home --home-dir /home/dmsaibridge --shell /bin/bash dmsaibr
 # Prepare directories and make entrypoints executable
 RUN mkdir -p /app/temp /app/logs \
     && chmod +x /app/.docker/entrypoint.sh \
-    && chmod +x /app/.docker/entrypoint-ingestion.sh \
+    && chmod +x /app/.docker/entrypoint-file-ingestion.sh \
+    && chmod +x /app/.docker/entrypoint-mail-ingestion.sh \
     && chmod +x /app/.docker/entrypoint-sync.sh
 
 # Set ownership of /app and home

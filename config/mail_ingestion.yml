@@ -1,0 +1,26 @@
+# Mail Ingestion Configuration
+# Configure IMAP accounts for mail ingestion into the DMS.
+#
+# All connection settings and non-secret config live here.
+# Only the password for each account is read from ENV:
+#   MAIL_INGESTION_{ACCOUNT_ID}_PASSWORD
+#
+# The account_id (uppercased) is used as the ENV key suffix.
+# Example: id "company_invoices" → MAIL_INGESTION_COMPANY_INVOICES_PASSWORD
+
+accounts:
+  - id: marc_business
+    dms_engine: postgresql
+    default_owner_id: 1
+    imap_server: w0178a47.kasserver.com
+    imap_port: 993          # optional, default: 993
+    imap_ssl: true          # optional, default: true
+    username: m055b907
+    recipient_mapping:
+      "example@company.com": 1
+    attachment_extensions: [pdf, docx, xlsx, jpg, png]
+    ingest_body: true
+    folders:
+      - path: INBOX
+        document_type: "E-Mail"
+        tags: []

@@ -692,4 +692,7 @@ class RAGClientInterface(ClientInterface):
             label_names=points[0].label_names,
             dms_label_ids=points[0].label_ids,
             created=points[0].created,
+            # custom_fields come from the first chunk — all chunks of the same document
+            # share the same payload metadata, so taking chunk 0 is sufficient
+            custom_fields=points[0].custom_fields,
         )

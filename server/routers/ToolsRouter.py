@@ -77,6 +77,7 @@ async def tool_search_documents(
             document_type=p.type_name,
             tags=p.label_names or [],
             view_url=search_service.get_document_url_by_id(dms_engine=p.dms_engine, doc_id=p.dms_doc_id),
+            custom_fields=p.custom_fields or {},
         )
         for p in points
     ]
@@ -114,6 +115,7 @@ async def tool_list_filter_options(
         correspondents=options.get("correspondents", []),
         document_types=options.get("document_types", []),
         tags=options.get("tags", []),
+        custom_fields=options.get("custom_fields", {}),
     )
 
 
@@ -171,6 +173,7 @@ async def tool_get_document_details(
             document_type=d.type_name,
             tags=d.label_names or [],
             view_url=search_service.get_document_url_by_id(dms_engine=d.dms_engine, doc_id=d.dms_doc_id),
+            custom_fields=d.custom_fields or {},
         )
         for d in all_docs
     ]

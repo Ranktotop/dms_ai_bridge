@@ -1,6 +1,6 @@
-from services.doc_ingestion.Exceptions import PathTemplateValidationError, DocumentPathValidationError
+from services.ingestion.exceptions import PathTemplateValidationError, DocumentPathValidationError
 from collections.abc import Callable
-from services.doc_ingestion.Dataclasses import DocMetadata
+from services.ingestion.dataclasses import DocMetadata
 from shared.helper.HelperConfig import HelperConfig
 from shared.helper.HelperFile import HelperFile
 import os
@@ -70,6 +70,8 @@ class PathTemplateParser:
             # check if wrapped in <> or [] to identify placeholders, and extract field name
             is_placeholder = bool(re.match(r"^[\[<][^/]+[\]>]$", segment))
             fieldname = segment if not is_placeholder else segment[1:-1].strip().lower()
+            # default to False; overwritten below only when the segment is a [] wildcard placeholder
+            is_wildcard = False
 
             # if placeholder...
             if is_placeholder:
@@ -130,7 +132,7 @@ class PathTemplateParser:
 
     def get_segments_for_path(self, file_path: str, root_path: str, reverse_order: bool = False) -> list[str]:
         """
-        Get the segments of the relative path from root_path to file_path. 
+        Get the segments of the relative path from root_path to file_path.
         If reverse_order is True, return the segments in reverse order (useful for right zone processing).
 
         Args:
@@ -139,7 +141,7 @@ class PathTemplateParser:
             reverse_order: Whether to return the segments in reverse order.
 
         Returns:
-            A list of path segments in the specified order.        
+            A list of path segments in the specified order.
         """
         try:
             file_path_rel = os.path.relpath(file_path, root_path)
@@ -151,7 +153,7 @@ class PathTemplateParser:
 
     def _strip_until_static_match(self, file_path: str, root_path: str) -> str:
         """
-        Strip segments from the file path until a static segment from the template is matched. 
+        Strip segments from the file path until a static segment from the template is matched.
         This is used to find the correct starting point for parsing when there are extra segments in the path.
 
         Args:
@@ -159,7 +161,7 @@ class PathTemplateParser:
             root_path: The root path to which the file path is relative.
 
         Returns:
-            The stripped file path starting from the first matched static segment.        
+            The stripped file path starting from the first matched static segment.
         """
         segments = self.get_segments_for_path(file_path, root_path)
 
@@ -223,9 +225,24 @@ class PathTemplateParser:
             return None
         return filename_segment
 
-    def _fill_template(self, path_segments: list[str], path_templates: list[TemplateSegment], from_right: bool) -> DocMetadata:
-        meta = DocMetadata()
+    def _fill_template(self, path_segments: list[str], path_templates: list[TemplateSegment], filename:str, from_right: bool) -> DocMetadata:
+        """
+        Fills the given path segments into the provided path templates to generate document metadata.
 
+        Args:
+            path_segments (list[str]): The segments of the path to fill into the template.
+            path_templates (list[TemplateSegment]): The template segments to fill.
+            filename (str): The filename to set in the returned DocMetadata.
+            from_right (bool): Whether to fill the template from the right side.
+
+        Returns:
+            DocMetadata: The generated document metadata.
+
+        Raises:
+            DocumentPathValidationError: If the path segments do not match the template.
+        """
+        meta = DocMetadata(filename=filename)
+        
         # if either segments or templates are empty, we cannot fill anything, return empty meta
         if not path_segments or not path_templates:
             return meta
@@ -288,6 +305,9 @@ class PathTemplateParser:
         - Right-to-left: assign template segments until mismatch
         - Anything in between -> elastic part -> meta.tags
         - All template placeholders must be filled, otherwise raise DocumentPathValidationError
+
+        Raises:
+            DocumentPathValidationError: If the path does not satisfy the template requirements (e.g. missing correspondent segment, failed validation, or static segment mismatch).
         """
 
         # Make sure we start on the correct segment
@@ -312,7 +332,6 @@ class PathTemplateParser:
         dynamic_templates = [t for t in self._template_segments if not t.is_wildcard]
 
         # check if we have wildcard placeholders
-        template_start_index = 0
         template_end_index = len(self._template_segments) - 1
         template_middle_index = template_end_index
 
@@ -327,6 +346,7 @@ class PathTemplateParser:
             filled_meta = self._fill_template(
                 path_segments=dynamic_segments,
                 path_templates=dynamic_templates,
+                filename=filename,
                 from_right=True)
             filled_meta.filename = meta.filename  # preserve filename
             return filled_meta
@@ -336,6 +356,7 @@ class PathTemplateParser:
             filled_meta = self._fill_template(
                 path_segments=dynamic_segments,
                 path_templates=dynamic_templates,
+                filename=filename,
                 from_right=False)
             filled_meta.filename = meta.filename  # preserve filename
             return filled_meta
@@ -366,10 +387,12 @@ class PathTemplateParser:
         filled_left_meta = self._fill_template(
             path_segments=left_segments,
             path_templates=left_templates,
+            filename=filename,
             from_right=False)
         filled_right_meta = self._fill_template(
             path_segments=right_segments,
             path_templates=right_templates,
+            filename=filename,
             from_right=True)
 
         # now merge the filled metas. Since we splitted they should not have any overlapping fields

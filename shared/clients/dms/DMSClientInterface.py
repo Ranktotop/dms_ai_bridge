@@ -7,6 +7,7 @@ from shared.clients.dms.models.Tag import TagBase, TagDetails, TagsListResponse
 from shared.clients.dms.models.Owner import OwnerBase, OwnerDetails, OwnersListResponse
 from shared.clients.dms.models.DocumentType import DocumentTypeBase, DocumentTypeDetails, DocumentTypesListResponse
 from shared.clients.dms.models.DocumentUpdate import DocumentUpdateRequest
+from shared.clients.dms.models.CustomField import CustomFieldBase, CustomFieldDetails, CustomFieldsListResponse
 from typing import Callable, TypeVar
 T = TypeVar("T")
 
@@ -14,13 +15,15 @@ class DMSClientInterface(ClientInterface):
     def __init__(self, helper_config: HelperConfig):
         super().__init__(helper_config=helper_config)
 
-        # cache 
+        # cache
         self._cache_documents: dict[str, DocumentDetails] | None = None
         self._cache_correspondents: dict[str, CorrespondentDetails] | None = None
         self._cache_tags: dict[str, TagDetails] | None = None
         self._cache_owners: dict[str, OwnerDetails] | None = None
         self._cache_document_types: dict[str, DocumentTypeDetails] | None = None
         self._cache_enriched_documents: dict[str, DocumentHighDetails] | None = None
+        # key = field id (str) — populated during fill_cache() alongside other metadata caches
+        self._cache_custom_fields: dict[str, CustomFieldDetails] = {}
 
     ##########################################
     ############### CHECKER ##################
@@ -274,6 +277,36 @@ class DMSClientInterface(ClientInterface):
         """
         pass
 
+    @abstractmethod
+    def _get_endpoint_custom_fields(self, page: int, page_size: int) -> str:
+        """
+        Returns the endpoint path for paginated custom field definition listing.
+
+        Args:
+            page (int): The page number for paginated listing.
+            page_size (int): The number of items per page.
+
+        Returns:
+            str: The endpoint path (e.g. '/api/custom_fields/?page=1&page_size=300').
+
+        Raises:
+            NotImplementedError: If the method is not implemented in a subclass.
+        """
+        pass
+
+    @abstractmethod
+    def _get_endpoint_create_custom_field(self) -> str:
+        """
+        Returns the endpoint path for creating a new custom field definition.
+
+        Returns:
+            str: The endpoint path (e.g. '/api/custom_fields/').
+
+        Raises:
+            NotImplementedError: If the method is not implemented in a subclass.
+        """
+        pass
+
     ##########################################
     ############# PAYLOAD HOOKS ##############
     ##########################################
@@ -321,14 +354,35 @@ class DMSClientInterface(ClientInterface):
         pass
 
     @abstractmethod
-    def get_update_document_payload(self, document_id: int, update: DocumentUpdateRequest) -> dict:
+    def get_create_custom_field_payload(self, name: str, data_type: str) -> dict:
         """
-        Returns the payload for updating a document on the dms system. 
-        This is used in the do_update_document() method.
+        Returns the payload for creating a new custom field definition on the DMS.
+
+        Args:
+            name (str): Display name for the field.
+            data_type (str): Data type identifier (e.g. 'string').
+
+        Returns:
+            dict: The payload for the create custom field request.
+        """
+        pass
+
+    @abstractmethod
+    def get_update_document_payload(
+        self,
+        document_id: int,
+        update: DocumentUpdateRequest,
+        custom_field_pairs: list[tuple[int, str]] | None = None,
+    ) -> dict:
+        """
+        Returns the payload for updating a document on the DMS.
 
         Args:
             document_id (int): The ID of the document to update.
-            update (DocumentUpdateRequest): The update request object.
+            update (DocumentUpdateRequest): Fields to set. None values are omitted.
+            custom_field_pairs (list[tuple[int, str]] | None): Pre-resolved
+                (field_id, value) pairs to include in the update. When non-empty,
+                the backend serialises them into its native custom-field format.
 
         Returns:
             dict: The payload for the update document request.
@@ -645,14 +699,26 @@ class DMSClientInterface(ClientInterface):
     ) -> bool:
         """Update metadata fields of an existing document.
 
+        When update.custom_fields is non-empty, each key (field name) is resolved
+        to an integer field_id via do_resolve_or_create_custom_field() before the
+        payload is built — so the backend always receives numeric IDs, not names.
+
         Args:
-            document_id: The DMS document ID to update.
-            update: Fields to set. None values are omitted from the request.
+            document_id (int): The DMS document ID to update.
+            update (DocumentUpdateRequest): Fields to set. None values are omitted.
 
         Returns:
-            True on success.
+            bool: True on success.
         """
-        payload = self.get_update_document_payload(document_id, update)
+        # resolve field names → IDs before handing off to the payload builder so
+        # every backend receives the canonical (int id, str value) representation
+        custom_field_pairs: list[tuple[int, str]] = []
+        if update.custom_fields:
+            for field_name, value in update.custom_fields.items():
+                field_id = await self.do_resolve_or_create_custom_field(field_name)
+                custom_field_pairs.append((field_id, value))
+
+        payload = self.get_update_document_payload(document_id, update, custom_field_pairs)
         if not payload:
             return True
         response = await self.do_request(
@@ -761,6 +827,72 @@ class DMSClientInterface(ClientInterface):
                     )
                     return int(tag_id)
             raise
+
+    @abstractmethod
+    async def do_fetch_custom_fields(self) -> list[CustomFieldBase]:
+        """
+        Fetches all custom field definitions from the DMS.
+
+        Returns:
+            list[CustomFieldBase]: All custom field definitions available in the DMS.
+        """
+        pass
+
+    @abstractmethod
+    async def do_create_custom_field(self, name: str, data_type: str = "string") -> int:
+        """
+        Creates a new custom field definition in the DMS.
+
+        Args:
+            name (str): Display name for the field.
+            data_type (str): Data type identifier (default 'string').
+
+        Returns:
+            int: The new field's ID.
+        """
+        pass
+
+    def get_custom_fields(self) -> dict[str, CustomFieldDetails]:
+        """
+        Returns the cached custom field definitions keyed by field id.
+
+        The cache is populated during fill_cache() — this getter is synchronous
+        because the cache is already warm by the time callers need it.
+
+        Returns:
+            dict[str, CustomFieldDetails]: Custom field definitions indexed by str(id).
+        """
+        return self._cache_custom_fields
+
+    async def do_resolve_or_create_custom_field(
+        self, name: str, data_type: str = "string"
+    ) -> int:
+        """
+        Resolves an existing custom field by name or creates it if absent.
+
+        Looks up the current _cache_custom_fields by name. If not found, creates
+        the field and injects the new entry into the cache so subsequent calls in
+        the same session don't trigger another round-trip.
+
+        Args:
+            name (str): Custom field name to look up or create.
+            data_type (str): Data type if creation is needed (default 'string').
+
+        Returns:
+            int: The field's ID (existing or newly created).
+        """
+        custom_fields = self.get_custom_fields()
+        for cf in custom_fields.values():
+            if cf.name == name:
+                self.logging.debug("Resolved custom_field '%s' → id=%s", name, cf.id)
+                return int(cf.id)
+        # field not found in cache — create it and cache the new definition immediately
+        new_id = await self.do_create_custom_field(name, data_type)
+        self.logging.info("Created new custom_field '%s' → id=%d", name, new_id)
+        self._cache_custom_fields[str(new_id)] = CustomFieldDetails(
+            engine=self._get_engine_name(), id=str(new_id), name=name
+        )
+        return new_id
 
     ##########################################
     ########### RESPONSE PARSER ##############
@@ -971,10 +1103,34 @@ class DMSClientInterface(ClientInterface):
         await self.get_correspondents(force=force_refresh)
         await self.get_documents(force=force_refresh)
 
+        # fetch custom field definitions so they can be resolved by name during enrichment
+        try:
+            custom_field_list = await self.do_fetch_custom_fields()
+            self._cache_custom_fields = {cf.id: cf for cf in custom_field_list if isinstance(cf, CustomFieldDetails)}
+            # do_fetch_custom_fields() may return CustomFieldBase objects for backends that
+            # only return id; ensure every cached entry is at least a CustomFieldDetails shell
+            for cf in custom_field_list:
+                if not isinstance(cf, CustomFieldDetails):
+                    self._cache_custom_fields[cf.id] = CustomFieldDetails(
+                        engine=cf.engine, id=cf.id
+                    )
+            self.logging.debug(
+                "fill_cache: loaded %d custom field definition(s) from %s",
+                len(self._cache_custom_fields), self._get_engine_name(),
+            )
+        except Exception as exc:
+            # a missing custom fields endpoint is not fatal — log and continue with an
+            # empty cache so that documents without custom fields still enrich correctly
+            self.logging.warning(
+                "fill_cache: could not load custom fields from %s — %s",
+                self._get_engine_name(), exc,
+            )
+            self._cache_custom_fields = {}
+
         # check if enrichment is needed
         if self._cache_enriched_documents is not None and not force_refresh:
             return
-        
+
         # now build the enriched document cache with all the details needed for the LLM prompt in one place
         enriched_documents: dict[str, DocumentHighDetails] = {}
         for document_id, document_details in self._cache_documents.items():
@@ -994,12 +1150,35 @@ class DMSClientInterface(ClientInterface):
             if document_details.document_type_id and self._cache_document_types and document_details.document_type_id in self._cache_document_types:
                 document_type = self._cache_document_types[document_details.document_type_id]
 
+            # resolve raw (field_id, value) pairs stored on the DocumentDetails into a
+            # name → value dict using the custom field definition cache built above
+            resolved_custom_fields: dict[str, str] = {}
+            # custom_field_ids holds raw {field_id: value} pairs set by the parser;
+            # fill_cache() resolves them to {field_name: value} using the definition cache
+            raw_custom_fields: dict[str, str] = getattr(document_details, "custom_field_ids", {})
+            for field_id, value in raw_custom_fields.items():
+                cf_def = self._cache_custom_fields.get(field_id)
+                if cf_def and cf_def.name:
+                    # replace the numeric id key with the human-readable field name
+                    resolved_custom_fields[cf_def.name] = value
+                else:
+                    # definition missing from cache — keep the id as fallback key so data is not lost
+                    self.logging.warning(
+                        "fill_cache: custom field id=%s not found in cache for document id=%s — using id as key",
+                        field_id, document_id,
+                    )
+                    resolved_custom_fields[field_id] = value
+
             enriched_document = DocumentHighDetails(
-                **document_details.model_dump(),
+                # exclude custom_field_ids — it is an internal raw-ID field on DocumentDetails
+                # that has no counterpart on DocumentHighDetails; custom_fields carries the
+                # resolved name→value dict instead
+                **document_details.model_dump(exclude={"custom_field_ids"}),
                 correspondent=correspondent,
                 owner=owner,
                 tags=tags,
-                document_type=document_type
+                document_type=document_type,
+                custom_fields=resolved_custom_fields,
             )
             enriched_documents[document_id] = enriched_document
 

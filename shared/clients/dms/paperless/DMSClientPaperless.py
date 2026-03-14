@@ -9,6 +9,7 @@ from shared.clients.dms.models.Correspondent import CorrespondentsListResponse, 
 from shared.clients.dms.models.Tag import TagsListResponse, TagDetails
 from shared.clients.dms.models.Owner import OwnersListResponse, OwnerDetails
 from shared.clients.dms.models.DocumentType import DocumentTypesListResponse, DocumentTypeDetails
+from shared.clients.dms.models.CustomField import CustomFieldBase, CustomFieldDetails, CustomFieldsListResponse
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
 import mimetypes
@@ -143,6 +144,12 @@ class DMSClientPaperless(DMSClientInterface):
     def _get_endpoint_delete_document(self, document_id: int) -> str:
         return "/api/documents/%d/" % document_id
 
+    def _get_endpoint_custom_fields(self, page: int, page_size: int) -> str:
+        return "/api/custom_fields/?page=%d&page_size=%d" % (page, page_size)
+
+    def _get_endpoint_create_custom_field(self) -> str:
+        return "/api/custom_fields/"
+
     ##########################################
     ############# PAYLOAD HOOKS ##############
     ##########################################
@@ -156,7 +163,15 @@ class DMSClientPaperless(DMSClientInterface):
     def get_create_tag_payload(self, name: str) -> dict:
         return {"name": name}
 
-    def get_update_document_payload(self, document_id: int, update: DocumentUpdateRequest) -> dict:
+    def get_create_custom_field_payload(self, name: str, data_type: str) -> dict:
+        return {"name": name, "data_type": data_type}
+
+    def get_update_document_payload(
+        self,
+        document_id: int,
+        update: DocumentUpdateRequest,
+        custom_field_pairs: list[tuple[int, str]] | None = None,
+    ) -> dict:
         payload: dict = {}
         if update.title is not None:
             payload["title"] = update.title
@@ -172,6 +187,12 @@ class DMSClientPaperless(DMSClientInterface):
             payload["created"] = update.created_date
         if update.owner_id is not None:
             payload["owner"] = update.owner_id
+        if custom_field_pairs:
+            # Paperless-ngx expects [{"field": <id>, "value": <str>}, ...]
+            payload["custom_fields"] = [
+                {"field": field_id, "value": value}
+                for field_id, value in custom_field_pairs
+            ]
         return payload
 
     ##########################################
@@ -317,6 +338,50 @@ class DMSClientPaperless(DMSClientInterface):
         )
         return True
 
+    async def do_fetch_custom_fields(self) -> list[CustomFieldBase]:
+        """Fetch all custom field definitions from Paperless-ngx, paginating like tags."""
+        custom_fields: list[CustomFieldBase] = []
+        page = 1
+        page_size = 300
+        while True:
+            resp = await self.do_request(
+                method="GET",
+                endpoint=self._get_endpoint_custom_fields(page=page, page_size=page_size),
+            )
+            list_response = self._parse_endpoint_custom_fields(resp.json())
+            custom_fields.extend(list_response.custom_fields)
+            self.logging.debug(
+                "Fetched custom fields page %d from %s, total so far: %d of %d",
+                page, self._get_engine_name(), len(custom_fields), list_response.overallCount,
+            )
+            page = list_response.nextPage
+            if not page:
+                break
+        self.logging.info(
+            "Fetched all custom fields from %s, total: %d.",
+            self._get_engine_name(), len(custom_fields),
+        )
+        return custom_fields
+
+    async def do_create_custom_field(self, name: str, data_type: str = "string") -> int:
+        """Create a new custom field definition in Paperless-ngx.
+
+        Args:
+            name (str): Display name for the new field.
+            data_type (str): Paperless-ngx data type identifier (default 'string').
+
+        Returns:
+            int: The newly created field's ID.
+        """
+        payload = self.get_create_custom_field_payload(name, data_type)
+        response = await self.do_request(
+            method="POST",
+            endpoint=self._get_endpoint_create_custom_field(),
+            json=payload,
+            raise_on_error=True,
+        )
+        return self._parse_endpoint_create_custom_field(response.json())
+
     ##########################################
     ########### RESPONSE PARSER ##############
     ##########################################
@@ -329,6 +394,9 @@ class DMSClientPaperless(DMSClientInterface):
         return int(response["id"])
 
     def _parse_endpoint_create_tag(self, response: dict) -> int:
+        return int(response["id"])
+
+    def _parse_endpoint_create_custom_field(self, response: dict) -> int:
         return int(response["id"])
 
     def _parse_endpoint_update_document(self, response: dict) -> bool:
@@ -446,6 +514,29 @@ class DMSClientPaperless(DMSClientInterface):
             lastPage= meta["overall_results_count"] // pageLen + (1 if meta["overall_results_count"] % pageLen > 0 else 0) if meta["overall_results_count"] and pageLen else None
         )
     
+    def _parse_endpoint_custom_fields(self, response: dict) -> CustomFieldsListResponse:
+        meta = self._parse_listing_meta(response)
+
+        # each result item is parsed into a CustomFieldDetails — same pattern as tags
+        custom_fields = []
+        for item in response.get("results", []):
+            custom_fields.append(self._parse_endpoint_custom_field(item))
+
+        return CustomFieldsListResponse(
+            engine=self._get_engine_name(),
+            custom_fields=custom_fields,
+            currentPage=meta["current_page"],
+            nextPage=meta["next_page"],
+            overallCount=meta["overall_results_count"] or 0,
+        )
+
+    def _parse_endpoint_custom_field(self, response: dict) -> CustomFieldDetails:
+        return CustomFieldDetails(
+            engine=self._get_engine_name(),
+            id=str(response.get("id")),
+            name=response.get("name"),
+        )
+
     def _parse_listing_meta(self, listing_response:dict) -> dict:
         """
         Parse the metadata from a listing response, including pagination details.
@@ -491,7 +582,14 @@ class DMSClientPaperless(DMSClientInterface):
                 created_date=datetime.fromisoformat(response.get("created_date")) if response.get("created_date") else None,
                 owner_id=str(v) if (v := response.get("owner")) is not None else None,
                 mime_type=response.get("mime_type"),
-                file_name=response.get("original_file_name")
+                file_name=response.get("original_file_name"),
+                # capture raw [{"field": id, "value": "..."}] pairs as {str(id): value} so
+                # fill_cache() can resolve field names using the custom field definition cache
+                custom_field_ids={
+                    str(item["field"]): item.get("value", "")
+                    for item in response.get("custom_fields", [])
+                    if item.get("field") is not None
+                },
             )
 
     def _parse_endpoint_correspondent(self, response: dict) -> CorrespondentDetails:

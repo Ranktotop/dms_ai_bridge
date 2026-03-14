@@ -43,3 +43,5 @@ class DocumentBase(BaseModel):
     label_names: list[str] = []
     dms_label_ids: list[str] = []
     created: str | None = None
+    # arbitrary DMS custom fields resolved from chunks — field_name → value
+    custom_fields: dict[str, str] = {}

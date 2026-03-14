@@ -10,6 +10,7 @@ from shared.clients.dms.models.Tag import TagBase, TagDetails, TagsListResponse
 from shared.clients.dms.models.Owner import OwnerBase, OwnerDetails, OwnersListResponse
 from shared.clients.dms.models.DocumentType import DocumentTypeBase, DocumentTypeDetails, DocumentTypesListResponse
 from shared.clients.dms.models.DocumentUpdate import DocumentUpdateRequest
+from shared.clients.dms.models.CustomField import CustomFieldBase, CustomFieldDetails, CustomFieldsListResponse
 from shared.clients.storage.StorageClientInterface import StorageClientInterface
 from shared.clients.storage.StorageClientManager import StorageClientManager
 from shared.helper.HelperConfig import HelperConfig
@@ -144,11 +145,11 @@ class DMSClientPostgresql(DMSClientInterface):
     ############# FETCH REQUESTS ##############
 
     async def do_fetch_documents(self) -> list[DocumentBase]:
-        """Fetch all documents and their tag associations in two bulk queries.
+        """Fetch all documents with tag and custom field associations in three bulk queries.
 
-        Two queries are used deliberately to avoid an N+1 pattern: one for the
-        documents table, one for all document_tags rows. Tag IDs are assembled
-        into per-document lists in Python using a dict keyed by document_id.
+        Three queries are used deliberately to avoid an N+1 pattern: one for the
+        documents table, one for all document_tags rows, and one for all
+        document_custom_fields rows. Maps are built in Python keyed by document_id.
         """
         self._assert_connected()
         async with self._pool.acquire() as conn:  # type: ignore[union-attr]
@@ -159,16 +160,25 @@ class DMSClientPostgresql(DMSClientInterface):
             tag_rows = await conn.fetch(
                 "SELECT document_id, tag_id FROM document_tags"
             )
+            cf_rows = await conn.fetch(
+                "SELECT document_id, custom_field_id, value FROM document_custom_fields"
+            )
 
         # build a tag lookup so each document can be enriched without extra queries
         tag_map: dict[int, list[str]] = {}
         for row in tag_rows:
             tag_map.setdefault(row["document_id"], []).append(str(row["tag_id"]))
 
+        # build a custom field lookup {document_id: {str(field_id): value}}
+        cf_map: dict[int, dict[str, str]] = {}
+        for row in cf_rows:
+            cf_map.setdefault(row["document_id"], {})[str(row["custom_field_id"])] = row["value"]
+
         documents: list[DocumentBase] = []
         for row in doc_rows:
             tag_ids = tag_map.get(row["id"], [])
-            documents.append(self._row_to_document_details(row, tag_ids))
+            custom_field_ids = cf_map.get(row["id"], {})
+            documents.append(self._row_to_document_details(row, tag_ids, custom_field_ids))
 
         self.logging.info(
             "DMSClientPostgresql: fetched %d document(s) from database", len(documents)
@@ -232,7 +242,7 @@ class DMSClientPostgresql(DMSClientInterface):
         return doc_types
 
     async def do_fetch_document_details(self, document_id: str) -> DocumentDetails:
-        """Fetch a single document with its tag IDs by primary key."""
+        """Fetch a single document with its tag IDs and custom field IDs by primary key."""
         self._assert_connected()
         async with self._pool.acquire() as conn:  # type: ignore[union-attr]
             doc_row = await conn.fetchrow(
@@ -245,12 +255,17 @@ class DMSClientPostgresql(DMSClientInterface):
                 "SELECT tag_id FROM document_tags WHERE document_id=$1",
                 int(document_id),
             )
+            cf_rows = await conn.fetch(
+                "SELECT custom_field_id, value FROM document_custom_fields WHERE document_id=$1",
+                int(document_id),
+            )
         if doc_row is None:
             raise ValueError(
                 "DMSClientPostgresql: document id=%s not found" % document_id
             )
         tag_ids = [str(row["tag_id"]) for row in tag_rows]
-        return self._row_to_document_details(doc_row, tag_ids)
+        custom_field_ids = {str(row["custom_field_id"]): row["value"] for row in cf_rows}
+        return self._row_to_document_details(doc_row, tag_ids, custom_field_ids)
 
     ############# WRITE REQUESTS #############
 
@@ -444,6 +459,46 @@ class DMSClientPostgresql(DMSClientInterface):
         )
         return new_id
 
+    async def do_fetch_custom_fields(self) -> list[CustomFieldBase]:
+        """Fetch all custom field definitions from the database."""
+        self._assert_connected()
+        async with self._pool.acquire() as conn:  # type: ignore[union-attr]
+            rows = await conn.fetch(
+                "SELECT id, name, data_type FROM custom_fields"
+            )
+        custom_fields: list[CustomFieldBase] = [
+            self._row_to_custom_field_details(row) for row in rows
+        ]
+        self.logging.info(
+            "DMSClientPostgresql: fetched %d custom field(s) from database", len(custom_fields)
+        )
+        return custom_fields
+
+    def get_custom_fields(self) -> dict[str, CustomFieldDetails]:
+        """
+        Returns the cached custom field definitions keyed by field id.
+
+        Populated by fill_cache() — safe to call after boot().
+
+        Returns:
+            dict[str, CustomFieldDetails]: Custom field definitions indexed by str(id).
+        """
+        return self._cache_custom_fields
+
+    async def do_create_custom_field(self, name: str, data_type: str = "string") -> int:
+        """Insert a new custom field definition row and return its generated ID."""
+        self._assert_connected()
+        async with self._pool.acquire() as conn:  # type: ignore[union-attr]
+            new_id: int = await conn.fetchval(
+                "INSERT INTO custom_fields (name, data_type) VALUES ($1, $2) RETURNING id",
+                name, data_type,
+            )
+        self.logging.info(
+            "DMSClientPostgresql: created custom_field '%s' (type=%s) → id=%d",
+            name, data_type, new_id,
+        )
+        return new_id
+
     async def do_update_document(
         self, document_id: int, update: DocumentUpdateRequest
     ) -> bool:
@@ -496,6 +551,14 @@ class DMSClientPostgresql(DMSClientInterface):
             params.append(update.owner_id)
             idx += 1
 
+        # resolve custom field names → IDs before entering the transaction so we don't
+        # hold the connection while doing additional async DB round-trips for each field
+        resolved_custom_fields: list[tuple[int, str]] = []
+        if update.custom_fields:
+            for field_name, value in update.custom_fields.items():
+                field_id = await self.do_resolve_or_create_custom_field(field_name)
+                resolved_custom_fields.append((field_id, value))
+
         async with self._pool.acquire() as conn:  # type: ignore[union-attr]
             async with conn.transaction():
                 if set_parts:
@@ -517,6 +580,18 @@ class DMSClientPostgresql(DMSClientInterface):
                             "VALUES ($1, $2) ON CONFLICT DO NOTHING",
                             [(document_id, tid) for tid in update.tag_ids],
                         )
+
+                if resolved_custom_fields:
+                    # replace the entire custom field set atomically — delete then re-insert
+                    # is simpler than computing a diff for a typically-small collection
+                    await conn.execute(
+                        "DELETE FROM document_custom_fields WHERE document_id=$1", document_id
+                    )
+                    await conn.executemany(
+                        "INSERT INTO document_custom_fields (document_id, custom_field_id, value) "
+                        "VALUES ($1, $2, $3) ON CONFLICT (document_id, custom_field_id) DO UPDATE SET value=$3",
+                        [(document_id, field_id, value) for field_id, value in resolved_custom_fields],
+                    )
 
         self.logging.debug(
             "DMSClientPostgresql: updated document id=%d", document_id
@@ -711,10 +786,40 @@ class DMSClientPostgresql(DMSClientInterface):
         )
 
     def get_update_document_payload(
-        self, document_id: int, update: DocumentUpdateRequest
+        self, document_id: int, update: DocumentUpdateRequest, custom_field_pairs: list[tuple[int, str]] | None = None
     ) -> dict:
         raise NotImplementedError(
             "PostgreSQL backend bypasses HTTP — get_update_document_payload is not applicable"
+        )
+
+    def _get_endpoint_custom_fields(self, page: int, page_size: int) -> str:
+        raise NotImplementedError(
+            "PostgreSQL backend bypasses HTTP — _get_endpoint_custom_fields is not applicable"
+        )
+
+    def _get_endpoint_create_custom_field(self) -> str:
+        raise NotImplementedError(
+            "PostgreSQL backend bypasses HTTP — _get_endpoint_create_custom_field is not applicable"
+        )
+
+    def get_create_custom_field_payload(self, name: str, data_type: str) -> dict:
+        raise NotImplementedError(
+            "PostgreSQL backend bypasses HTTP — get_create_custom_field_payload is not applicable"
+        )
+
+    def _parse_endpoint_custom_fields(self, response: dict) -> CustomFieldsListResponse:
+        raise NotImplementedError(
+            "PostgreSQL backend bypasses HTTP — _parse_endpoint_custom_fields is not applicable"
+        )
+
+    def _parse_endpoint_custom_field(self, response: dict) -> CustomFieldDetails:
+        raise NotImplementedError(
+            "PostgreSQL backend bypasses HTTP — _parse_endpoint_custom_field is not applicable"
+        )
+
+    def _parse_endpoint_create_custom_field(self, response: dict) -> int:
+        raise NotImplementedError(
+            "PostgreSQL backend bypasses HTTP — _parse_endpoint_create_custom_field is not applicable"
         )
 
     ##########################################
@@ -737,6 +842,8 @@ class DMSClientPostgresql(DMSClientInterface):
                 await conn.execute(self._get_ddl_tags())
                 await conn.execute(self._get_ddl_documents())
                 await conn.execute(self._get_ddl_document_tags())
+                await conn.execute(self._get_ddl_custom_fields())
+                await conn.execute(self._get_ddl_document_custom_fields())
                 # migration: add content_hash to tables created before the column existed
                 await conn.execute(self._get_ddl_content_hash_column())
             # CREATE INDEX must run outside the transaction that creates the table
@@ -829,10 +936,29 @@ class DMSClientPostgresql(DMSClientInterface):
             ")"
         )
 
+    def _get_ddl_custom_fields(self) -> str:
+        return (
+            "CREATE TABLE IF NOT EXISTS custom_fields ("
+            "    id SERIAL PRIMARY KEY,"
+            "    name TEXT NOT NULL UNIQUE,"
+            "    data_type TEXT NOT NULL DEFAULT 'string'"
+            ")"
+        )
+
+    def _get_ddl_document_custom_fields(self) -> str:
+        return (
+            "CREATE TABLE IF NOT EXISTS document_custom_fields ("
+            "    document_id      INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,"
+            "    custom_field_id  INTEGER NOT NULL REFERENCES custom_fields(id) ON DELETE CASCADE,"
+            "    value            TEXT NOT NULL DEFAULT '',"
+            "    PRIMARY KEY (document_id, custom_field_id)"
+            ")"
+        )
+
     ################ ROW MAPPERS ##################
 
     def _row_to_document_details(
-        self, row: asyncpg.Record, tag_ids: list[str]
+        self, row: asyncpg.Record, tag_ids: list[str], custom_field_ids: dict[str, str] | None = None
     ) -> DocumentDetails:
         """Map an asyncpg Record from the documents table to a DocumentDetails model."""
         return DocumentDetails(
@@ -847,6 +973,16 @@ class DMSClientPostgresql(DMSClientInterface):
             created_date=row["created_date"],
             mime_type=row["mime_type"],
             file_name=row["file_name"],
+            # raw {str(field_id): value} pairs — fill_cache() resolves these to field names
+            custom_field_ids=custom_field_ids or {},
+        )
+
+    def _row_to_custom_field_details(self, row: asyncpg.Record) -> CustomFieldDetails:
+        """Map an asyncpg Record from the custom_fields table to a CustomFieldDetails model."""
+        return CustomFieldDetails(
+            engine=self._get_engine_name(),
+            id=str(row["id"]),
+            name=row["name"],
         )
 
     def _row_to_correspondent_details(self, row: asyncpg.Record) -> CorrespondentDetails:

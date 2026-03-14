@@ -255,15 +255,18 @@ class SearchService:
         return results
 
     async def do_get_filter_options(self, identity_helper: IdentityHelper) -> dict:
-        """Fetch available filter options (correspondents, document types, tags) for all identities.
+        """Fetch available filter options (correspondents, document types, tags, custom fields) for all identities.
 
         Args:
             identity_helper: Resolved user identities for filtering.
 
         Returns:
-            dict with keys 'correspondents', 'document_types', 'tags' — each a deduplicated list[str].
+            dict with keys 'correspondents', 'document_types', 'tags' (each a deduplicated list[str])
+            and 'custom_fields' (dict[str, list[str]] — field_name → deduplicated sorted values).
         """
         result: dict[str, list[str]] = {"correspondents": [], "document_types": [], "tags": []}
+        # custom_fields merges field values across all identities — field_name → deduped set
+        merged_custom_fields: dict[str, set[str]] = {}
         for identity in identity_helper.get_identities():
             cache_data = await self._cache_helper.get_data(identity.dms_engine, identity.owner_id)
             for key in ("correspondents", "document_types", "tags"):
@@ -271,6 +274,12 @@ class SearchService:
                 for value in (getattr(cache_data, key) or []):
                     if value not in existing:
                         existing.append(value)
+            # merge custom field values across identities — a user with multiple DMS accounts
+            # should see the union of all their custom field values in the filter UI
+            for field_name, values in (cache_data.custom_fields or {}).items():
+                target = merged_custom_fields.setdefault(field_name, set())
+                target.update(values)
+        result["custom_fields"] = {k: sorted(v) for k, v in merged_custom_fields.items()}
         return result
         
     def get_document_url_by_id(self, dms_engine:str, doc_id:str) -> str|None:
@@ -291,7 +300,7 @@ class SearchService:
         try:
             url = dms_client.get_document_view_url(doc_id)
             return url.strip() if url and url.strip() else None
-        except Exception as e:
+        except Exception:
             return None
 
     ##########################################

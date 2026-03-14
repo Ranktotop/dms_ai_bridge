@@ -367,13 +367,31 @@ dms_ai_bridge/
 │   └── models/
 │       └── config.py                    ← EnvConfig Pydantic model
 ├── services/
-│   ├── doc_ingestion/
-│   │   ├── IngestionService.py          ← orchestrator (boot Document → upload → PATCH)
-│   │   ├── doc_ingestion.py             ← entry point (python -m services.doc_ingestion)
-│   │   └── helper/
-│   │       ├── Document.py              ← central document class (convert, OCR, metadata, tags)
-│   │       ├── DocumentConverter.py     ← LibreOffice PDF conversion helper
-│   │       └── FileScanner.py           ← rglob + watchfiles file discovery
+│   ├── ingestion/
+│   │   ├── __init__.py
+│   │   ├── exceptions.py                ← ingestion exceptions
+│   │   ├── dataclasses.py               ← DocMetadata and related dataclasses
+│   │   ├── helper/                      ← shared between file + mail ingestion
+│   │   │   ├── __init__.py
+│   │   │   ├── Document.py              ← central document class (convert, OCR, metadata, tags)
+│   │   │   ├── DocumentConverter.py     ← LibreOffice PDF conversion helper
+│   │   │   └── PathTemplateParser.py    ← path template parsing
+│   │   ├── file/                        ← file-based ingestion
+│   │   │   ├── __init__.py
+│   │   │   ├── FileIngestionService.py  ← orchestrator (boot Document → upload → PATCH)
+│   │   │   ├── file_ingestion.py        ← entry point (python -m services.ingestion.file.file_ingestion)
+│   │   │   └── helper/
+│   │   │       ├── __init__.py
+│   │   │       └── FileScanner.py       ← rglob + watchfiles file discovery
+│   │   └── mail/                        ← IMAP mail ingestion
+│   │       ├── __init__.py
+│   │       ├── MailIngestionService.py  ← orchestrator (fetch → parse → upload)
+│   │       ├── mail_ingestion.py        ← entry point (python -m services.ingestion.mail.mail_ingestion)
+│   │       └── helper/
+│   │           ├── __init__.py
+│   │           ├── MailAccountConfigHelper.py ← reads mail_ingestion.yml + ENV credentials
+│   │           ├── MailFetcher.py       ← async IMAP client (aioimaplib)
+│   │           └── MailParser.py        ← MIME email → Document-compatible inputs
 │   ├── dms_rag_sync/
 │   │   ├── SyncService.py               ← DMS → embed → RAG orchestration
 │   │   └── dms_rag_sync.py              ← entry point (python -m services.dms_rag_sync)
@@ -382,7 +400,8 @@ dms_ai_bridge/
 │       └── helper/
 │           └── IdentityHelper.py        ← resolves frontend user_id → owner_id map
 ├── config/
-│   └── user_mapping.yml                 ← frontend/user_id → DMS owner_id mapping
+│   ├── user_mapping.yml                 ← frontend/user_id → DMS owner_id mapping
+│   └── mail_ingestion.yml               ← IMAP account + folder configuration
 └── server/
     ├── api_server.py                    ← FastAPI entry point with lifespan
     ├── routers/
@@ -572,19 +591,28 @@ changing search/ranking logic in `SearchService`.
 **Model:** `claude-sonnet-4-6`
 
 **Owns:**
-- `services/doc_ingestion/IngestionService.py` — orchestrator
-- `services/doc_ingestion/doc_ingestion.py` — entry point
-- `services/doc_ingestion/helper/Document.py` — central document class
-- `services/doc_ingestion/helper/DocumentConverter.py` — LibreOffice PDF conversion
-- `services/doc_ingestion/helper/FileScanner.py` — file discovery
+- `services/ingestion/` (entire subtree — file + mail ingestion)
+- `services/ingestion/exceptions.py`, `services/ingestion/dataclasses.py`
+- `services/ingestion/helper/Document.py` — central document class
+- `services/ingestion/helper/DocumentConverter.py` — LibreOffice PDF conversion
+- `services/ingestion/helper/PathTemplateParser.py` — path template parsing
+- `services/ingestion/file/FileIngestionService.py` — file ingestion orchestrator
+- `services/ingestion/file/file_ingestion.py` — file ingestion entry point
+- `services/ingestion/file/helper/FileScanner.py` — file discovery
+- `services/ingestion/mail/MailIngestionService.py` — mail ingestion orchestrator
+- `services/ingestion/mail/mail_ingestion.py` — mail ingestion entry point
+- `services/ingestion/mail/helper/MailAccountConfigHelper.py` — account config + owner_id resolution
+- `services/ingestion/mail/helper/MailFetcher.py` — IMAP client
+- `services/ingestion/mail/helper/MailParser.py` — MIME parser
+- `config/mail_ingestion.yml` — mail account + folder configuration
 - Abstract write methods in `shared/clients/dms/DMSClientInterface.py`
-  (`do_upload_document`, `do_update_document`, `do_resolve_or_create_*`)
 - Paperless implementations of those write methods in `DMSClientPaperless.py`
 
 **Invoke when:**
-modifying the ingestion pipeline, changing OCR or text extraction strategy, updating
-path template parsing, debugging document upload or metadata update issues, or adding
-new DMS write capabilities.
+modifying the ingestion pipeline (file or mail), changing OCR or text extraction strategy,
+updating path template parsing, debugging document upload or metadata update issues,
+adding new DMS write capabilities, modifying IMAP connection or mail parsing logic,
+or changing mail account configuration.
 
 **Key classes:**
 
@@ -793,6 +821,35 @@ self.logging.info(f"Syncing document {doc_id}")
 ### Type annotations
 PEP 604 union syntax: `str | None` — never `Optional[str]`
 
+### Docstrings
+Opening `"""` always on its own line — never inline with the description:
+
+```python
+# correct
+def foo(self, x: int) -> str:
+    """
+    Description here.
+    """
+
+# WRONG
+def foo(self, x: int) -> str:
+    """Description here."""
+```
+
+Args: parameter name followed by type in parentheses, then colon and description:
+```
+param_name (type): Description.
+```
+
+Returns: type followed by colon and description — no parameter name:
+```
+type: Description.
+```
+
+Keep descriptions concise — one sentence where possible. Do not repeat what the code already makes obvious (e.g. no need to list every internal state field that gets set).
+
+Never use RST double-backtick quoting for string keys (``"key"``). Use single quotes instead: `'key'`.
+
 ### Configuration keys
 Pattern: `{CLIENT_TYPE}_{ENGINE_NAME}_{SETTING}`
 
@@ -805,6 +862,12 @@ CACHE_REDIS_BASE_URL       CACHE_REDIS_PASSWORD   CACHE_REDIS_DB
 CACHE_DEFAULT_TTL_SECONDS  LLM_MAX_FILTER_VALUES_PER_CATEGORY
 OCR_ENGINE                 OCR_TIMEOUT                        OCR_DOCLING_BASE_URL       OCR_DOCLING_API_KEY
 USER_MAPPING_FILE          (path to user_mapping.yml, default: config/user_mapping.yml)
+FILE_INGESTION_WATCH       FILE_INGESTION_PAPERLESS_PATH
+MAIL_INGESTION_CONFIG              (path to mail_ingestion.yml, default: config/mail_ingestion.yml)
+MAIL_INGESTION_WATCH               (watch mode, default: false)
+MAIL_INGESTION_POLL_INTERVAL_SECONDS (polling interval in watch mode, default: 300)
+MAIL_INGESTION_BATCH_SIZE          (max messages per run, default: 0 = no limit)
+MAIL_INGESTION_{ACCOUNT_ID}_PASSWORD  (only secret; all other config lives in mail_ingestion.yml)
 ```
 
 Never call `os.getenv()` directly in business logic — always use `HelperConfig`.
@@ -860,7 +923,7 @@ SYSTEM_PROMPT = "You are a ..."
 | Redis, `CacheClientInterface`, filter option cache, cache invalidation | `cache-agent` |
 | Ollama, `LLMClientInterface`, embedding, chat, new LLM provider | `embed-llm-agent` |
 | Sync pipeline, `SyncService`, `SearchService`, orphan cleanup | `service-agent` |
-| File ingestion, `Document`, `DocumentConverter`, `IngestionService` | `ingestion-agent` |
+| File ingestion, mail ingestion, `Document`, `DocumentConverter`, `IngestionService`, `MailIngestionService`, IMAP | `ingestion-agent` |
 | `OCRClientInterface`, `OCRClientDocling`, `OCR_ENGINE`, Docling backend | `ocr-agent` |
 | FastAPI routes, `ToolsRouter`, `QueryRouter`, webhook, auth, server | `api-agent` |
 | `UserMappingService`, `user_mapping.yml`, frontend/user_id resolution | `api-agent` |

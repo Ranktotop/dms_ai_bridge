@@ -1,15 +1,16 @@
-"""Entry point for the document ingestion service.
+"""Entry point for the file ingestion service.
 
-Configuration is read from environment variables (or .doc_ingestion.env).
+Configuration is read from environment variables (or .env).
 
 Per-engine (required to activate an engine):
-    DOC_INGESTION_{ENGINE}_PATH      Directory to scan, e.g. DOC_INGESTION_PAPERLESS_PATH
-    DOC_INGESTION_{ENGINE}_TEMPLATE  Path template (optional, falls back to global)
-    DOC_INGESTION_{ENGINE}_OWNER_ID  DMS owner_id (optional, falls back to global)
+    FILE_INGESTION_{ENGINE}_PATH      Directory to scan, e.g. FILE_INGESTION_PAPERLESS_PATH
+    FILE_INGESTION_{ENGINE}_TEMPLATE  Path template (required per engine)
+    FILE_INGESTION_{ENGINE}_OWNER_ID  DMS owner_id (optional, falls back to global)
 
 Global fallbacks:
-    DOC_INGESTION_OWNER_ID           Default owner_id
-    DOC_INGESTION_WATCH              Watch mode for all engines: 'true' / '1' (default: false)
+    FILE_INGESTION_OWNER_ID           Default owner_id
+    FILE_INGESTION_WATCH              Watch mode for all engines: 'true' / '1' (default: false)
+    FILE_INGESTION_BATCH_SIZE         Max files per batch (0 = no limit, default: 0)
 """
 import asyncio
 import os
@@ -25,15 +26,13 @@ from shared.clients.dms.DMSClientInterface import DMSClientInterface
 from shared.clients.dms.DMSClientManager import DMSClientManager
 from shared.clients.llm.LLMClientManager import LLMClientManager
 from shared.clients.ocr.OCRClientManager import OCRClientManager
-from services.doc_ingestion.IngestionService import IngestionService
-from services.doc_ingestion.helper.FileScanner import FileScanner
+from services.ingestion.file.FileIngestionService import FileIngestionService
+from services.ingestion.file.helper.FileScanner import FileScanner
 from shared.clients.prompt.PromptClientManager import PromptClientManager
 from shared.clients.prompt.PromptClientInterface import PromptClientInterface
 
 load_dotenv()
 logging = setup_logging()
-
-_DEFAULT_TEMPLATE = "{filename}"
 
 
 @dataclass
@@ -48,20 +47,20 @@ class _EngineTask:
 def _read_engine_tasks(dms_clients: list[DMSClientInterface]) -> list[_EngineTask]:
     """Build per-engine ingestion tasks from environment variables.
 
-    An engine is activated when DOC_INGESTION_{ENGINE}_PATH is set.
+    An engine is activated when FILE_INGESTION_{ENGINE}_PATH is set.
     Template and owner_id fall back to global defaults if not set per-engine.
     """
-    global_owner_raw = os.getenv("DOC_INGESTION_OWNER_ID", "").strip()
+    global_owner_raw = os.getenv("FILE_INGESTION_OWNER_ID", "").strip()
     global_owner_id = int(global_owner_raw) if global_owner_raw else None
 
     tasks: list[_EngineTask] = []
     for client in dms_clients:
         engine = client.get_engine_name().upper()
 
-        path = os.getenv("DOC_INGESTION_%s_PATH" % engine, "").strip()
+        path = os.getenv("FILE_INGESTION_%s_PATH" % engine, "").strip()
         if not path:
             logging.debug(
-                "Engine '%s': DOC_INGESTION_%s_PATH not set, skipping.", engine, engine
+                "Engine '%s': FILE_INGESTION_%s_PATH not set, skipping.", engine, engine
             )
             continue
 
@@ -73,7 +72,7 @@ def _read_engine_tasks(dms_clients: list[DMSClientInterface]) -> list[_EngineTas
             continue
 
         # Read the path template for engine
-        template_name = "DOC_INGESTION_%s_TEMPLATE" % engine
+        template_name = "FILE_INGESTION_%s_TEMPLATE" % engine
         # if the env is not set, throw error
         if template_name not in os.environ:
             raise ValueError(f"Missing required environment variable '{template_name}' for engine '{engine}'.")
@@ -82,7 +81,7 @@ def _read_engine_tasks(dms_clients: list[DMSClientInterface]) -> list[_EngineTas
         if not template:
             raise ValueError(f"Environment variable '{template_name}' for engine '{engine}' cannot be empty.")
 
-        owner_raw = os.getenv("DOC_INGESTION_%s_OWNER_ID" % engine, "").strip()
+        owner_raw = os.getenv("FILE_INGESTION_%s_OWNER_ID" % engine, "").strip()
         owner_id = int(owner_raw) if owner_raw else global_owner_id
 
         tasks.append(
@@ -107,11 +106,11 @@ async def _run_once(tasks: list[_EngineTask], helper_config: HelperConfig, llm_c
 
     Files are processed phase-by-phase within each batch so each LLM model
     stays resident in VRAM for the full batch before being swapped out.
-    Batch size is controlled by ``DOC_INGESTION_BATCH_SIZE`` (0 = no limit).
+    Batch size is controlled by ``FILE_INGESTION_BATCH_SIZE`` (0 = no limit).
     """
-    batch_size = int(os.getenv("DOC_INGESTION_BATCH_SIZE", "0").strip())
+    batch_size = int(os.getenv("FILE_INGESTION_BATCH_SIZE", "0").strip())
     for task in tasks:
-        service = IngestionService(
+        service = FileIngestionService(
             helper_config=helper_config,
             dms_client=task.dms_client,
             llm_client=llm_client,
@@ -135,13 +134,13 @@ async def _run_watch(tasks: list[_EngineTask], helper_config: HelperConfig, llm_
 
     Detected files are placed into a per-engine queue after their size has
     stabilised.  A single worker drains the queue in batches (controlled by
-    ``DOC_INGESTION_BATCH_SIZE``) and calls ``do_ingest_files_batch`` so that
+    ``FILE_INGESTION_BATCH_SIZE``) and calls ``do_ingest_files_batch`` so that
     only one batch is active at a time while the queue keeps accumulating.
     """
-    batch_size = int(os.getenv("DOC_INGESTION_BATCH_SIZE", "0").strip())
+    batch_size = int(os.getenv("FILE_INGESTION_BATCH_SIZE", "0").strip())
 
     async def watch_engine(task: _EngineTask) -> None:
-        service = IngestionService(
+        service = FileIngestionService(
             helper_config=helper_config,
             dms_client=task.dms_client,
             llm_client=llm_client,
@@ -192,7 +191,7 @@ async def _run_watch(tasks: list[_EngineTask], helper_config: HelperConfig, llm_
 
 
 async def run() -> None:
-    watch = os.getenv("DOC_INGESTION_WATCH", "false").strip().lower() in ("1", "true", "yes")
+    watch = os.getenv("FILE_INGESTION_WATCH", "false").strip().lower() in ("1", "true", "yes")
     helper_config = HelperConfig(logger=logging)
 
     dms_clients = DMSClientManager(helper_config=helper_config).get_clients()
@@ -216,8 +215,8 @@ async def run() -> None:
     tasks = _read_engine_tasks(dms_clients)
     if not tasks:
         logging.error(
-            "No engines configured for ingestion. "
-            "Set DOC_INGESTION_{ENGINE}_PATH for at least one engine "
+            "No engines configured for file ingestion. "
+            "Set FILE_INGESTION_{ENGINE}_PATH for at least one engine "
             "and ensure the directory exists."
         )
         sys.exit(0)

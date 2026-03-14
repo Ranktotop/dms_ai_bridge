@@ -159,6 +159,9 @@ class RAGClientQdrant(RAGClientInterface):
                 type_id=payload_details.get("type_id", None),
                 type_name=payload_details.get("type_name", None),
                 owner_username=payload_details.get("owner_username", None),
+                # custom_fields is stored as a plain dict in the Qdrant payload; default to empty
+                # dict so callers never have to guard against None
+                custom_fields=payload_details.get("custom_fields", {}),
                 score=response.get("score", None),
                 vector=response.get("vector", None)
             )

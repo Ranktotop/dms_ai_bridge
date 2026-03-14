@@ -49,6 +49,9 @@ class PointDetails(PointBase):
     type_name: str | None = None
     label_names: list[str] = []
 
+    # arbitrary DMS-specific fields that don't map to a standard attribute; field_name → value
+    custom_fields: dict[str, str] = {}
+
 class PointHighDetails(PointDetails):
     """Generic metadata payload stored alongside each vector chunk in a RAG backend.
 
@@ -100,6 +103,9 @@ class PointHighDetails(PointDetails):
     # Owner display name
     owner_username: str | None = None
     
+    # arbitrary DMS-specific fields that don't map to a standard attribute; field_name → value
+    custom_fields: dict[str, str] = {}
+
     # only on search results, not on scrolls
     vector: list[float] | None = None
 
@@ -232,6 +238,9 @@ class PointHighDetailsRequest(PointDetailsRequest):
 
     # Owner display name
     owner_username: str | None = None
+
+    # arbitrary DMS-specific fields that don't map to a standard attribute; field_name → value
+    custom_fields: dict[str, str] = {}
 
 class PointUpsert(BaseModel):
     """Typed input for a single point upsert into a RAG backend.

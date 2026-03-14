@@ -51,7 +51,9 @@
       "Bash(curl -s \"https://api.github.com/repos/mintplex-labs/anything-llm/git/trees/master?recursive=1\" | python3 -c \"import json,sys; data=json.load\\(sys.stdin\\); [print\\(i['path']\\) for i in data.get\\('tree',[]\\) if 'agent' in i['path'].lower\\(\\) or 'skill' in i['path'].lower\\(\\)]\" 2>&1 | grep -v \"^frontend\" | tail -60)",
       "Bash(curl -s \"https://raw.githubusercontent.com/mintplex-labs/anything-llm/master/server/utils/agents/imported.js\")",
       "Bash(curl -s \"https://raw.githubusercontent.com/mintplex-labs/anything-llm/master/server/utils/agents/aibitat/index.js\")",
-      "Bash(curl -s \"https://raw.githubusercontent.com/mintplex-labs/anything-llm/master/server/utils/agents/index.js\" | grep -n \"citation\\\\|sources\\\\|source\\\\|introspect\\\\|observation\\\\|result\\\\|handler\\\\|skill\" | head -50)"
+      "Bash(curl -s \"https://raw.githubusercontent.com/mintplex-labs/anything-llm/master/server/utils/agents/index.js\" | grep -n \"citation\\\\|sources\\\\|source\\\\|introspect\\\\|observation\\\\|result\\\\|handler\\\\|skill\" | head -50)",
+      "Bash(sed -i 's|from services.ingestion.helper.DocumentInterface import DocumentInterface|from services.ingestion.entities.DocumentInterface import DocumentInterface|g' /home/marcmeese/dms_ai_bridge/services/ingestion/entities/DocumentFile.py /home/marcmeese/dms_ai_bridge/services/ingestion/entities/DocumentMail.py && sed -i 's|from services.ingestion.file.helper.DocumentFile import DocumentFile|from services.ingestion.entities.DocumentFile import DocumentFile|g' /home/marcmeese/dms_ai_bridge/services/ingestion/file/FileIngestionService.py && sed -i 's|from services.ingestion.mail.helper.DocumentMail import DocumentMail|from services.ingestion.entities.DocumentMail import DocumentMail|g' /home/marcmeese/dms_ai_bridge/services/ingestion/mail/MailIngestionService.py)",
+      "WebFetch(domain:www.glukhov.org)"
     ]
   }
 }

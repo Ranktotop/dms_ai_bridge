@@ -39,27 +39,27 @@ class DocumentConverter:
         self.logging: logging.Logger = helper_config.get_logger()
         self._libreoffice: str | None = self._find_libreoffice()
         self._helper_file = HelperFile()
-        #add subfolder with 8 chars uuid
+        # add subfolder with 8 chars uuid to avoid collisions when multiple documents are processed concurrently
         self._working_directory = os.path.join(working_directory, uuid4().hex[:8])
 
-        #libreoffice is required for this helper
+        # libreoffice is required for this helper
         if not self._libreoffice:
-            raise RuntimeError("DocumentConverter: LibreOffice (soffice) is not installed or not in PATH")   
-        self.boot()     
-        
+            raise RuntimeError("DocumentConverter: LibreOffice (soffice) is not installed or not in PATH")
+        self.boot()
+
     ##########################################
     ############### CORE #####################
     ##########################################
 
     def boot(self) -> None:
         """Create the working directory.  Called automatically in ``__init__``."""
-        #create directory for converted files if it does not exist
+        # create directory for converted files if it does not exist
         if not self._helper_file.create_folder(self._working_directory):
             raise RuntimeError(f"DocumentConverter: failed to create working directory '{self._working_directory}' for converted files")
 
     def cleanup(self) -> None:
         """Remove the working directory and all converted files inside it."""
-        #delete the working dir
+        # delete the working dir
         if not self._helper_file.remove_folder(self._working_directory):
             self.logging.warning(f"DocumentConverter: failed to delete working directory '{self._working_directory}' for converted files")
 
@@ -110,26 +110,26 @@ class DocumentConverter:
             RuntimeError: If the converter is not booted, the file extension is
                 unsupported, the copy fails, or LibreOffice conversion fails.
         """
-        #check if helper is booted
+        # check if helper is booted
         if not self.is_booted():
             raise RuntimeError("DocumentConverter: cannot convert because helper is not booted")
-        
+
         # if the given path has already a native extension, copy it to a temp file and return the new path
-        if self._helper_file.get_file_extension(source_path,True,True) in self._get_supported_extensions():
-            path = os.path.join(self._working_directory, f"{uuid4().hex[:8]}.{self._helper_file.get_file_extension(source_path,True,True)}")
+        if self._helper_file.get_file_extension(source_path, True, True) in self._get_supported_extensions():
+            path = os.path.join(self._working_directory, f"{uuid4().hex[:8]}.{self._helper_file.get_file_extension(source_path, True, True)}")
             if self._helper_file.copy_file(source_path, path) is None:
                 raise RuntimeError(f"DocumentConverter: failed to copy file '{source_path}' to '{path}'")
             return path
-        
-        #if file is not even in a convertible format, raise an error
-        if self._helper_file.get_file_extension(source_path, True,True) not in self._get_extensions_to_convert():
-            raise RuntimeError(f"DocumentConverter: unsupported file extension '{self._helper_file.get_file_extension(source_path, True,True)}' for file '{source_path}'")
-        
-        #convert the file to PDF and return the new path
+
+        # if file is not even in a convertible format, raise an error
+        if self._helper_file.get_file_extension(source_path, True, True) not in self._get_extensions_to_convert():
+            raise RuntimeError(f"DocumentConverter: unsupported file extension '{self._helper_file.get_file_extension(source_path, True, True)}' for file '{source_path}'")
+
+        # convert the file to PDF and return the new path
         path = os.path.join(self._working_directory, f"{uuid4().hex[:8]}.pdf")
         self._convert_to_pdf(source_file=source_path, target_file=path)
-        return path 
-            
+        return path
+
     async def _convert_to_pdf(self, source_file: str, target_file: str) -> None:
         """Run LibreOffice headless to convert *source_file* to PDF in *target_file*.
 
@@ -141,10 +141,10 @@ class DocumentConverter:
             RuntimeError: If LibreOffice is unavailable or conversion fails.
             FileNotFoundError: If the expected PDF output was not created.
         """
-        #check if helper is booted
+        # check if helper is booted
         if not self.is_booted():
             raise RuntimeError("DocumentConverter: cannot convert because helper is not booted")
-        
+
         self.logging.debug(
             "DocumentConverter: converting '%s' to PDF via LibreOffice...", source_file
         )
@@ -173,15 +173,14 @@ class DocumentConverter:
         base_name = self._helper_file.get_basename(source_file)
         pdf_path = os.path.join(tmp_dir, f"{base_name}.pdf")
 
-        #if file not found, raise an error with the LibreOffice output for debugging
+        # if file not found, raise an error with the LibreOffice output for debugging
         if not self._helper_file.file_exist(pdf_path):
             raise FileNotFoundError(
                 "Expected PDF output not found at '%s'. "
                 "LibreOffice stdout: %s, stderr: %s"
                 % (pdf_path, stdout.decode(errors="replace").strip(), stderr.decode(errors="replace").strip())
             )
-        
-        #move the generated PDF to the target path and delete the temp dir
+
+        # move the generated PDF to the target path and delete the temp dir
         if not self._helper_file.move_file(pdf_path, target_file):
             raise RuntimeError(f"DocumentConverter: failed to move converted PDF from '{pdf_path}' to '{target_file}'")
-        

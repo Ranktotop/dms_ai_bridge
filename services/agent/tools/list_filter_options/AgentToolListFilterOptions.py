@@ -28,7 +28,7 @@ class AgentToolListFilterOptions(AgentToolInterface):
 
     def get_description(self) -> str:
         return (
-            "List available filter categories: correspondents, document types, and tags. "
+            "List available filter categories: correspondents, document types, tags, and custom fields. "
             "Use this to discover what values exist before filtering a search. "
             "No required args."
         )
@@ -68,6 +68,7 @@ class AgentToolListFilterOptions(AgentToolInterface):
         correspondents = options.get("correspondents", [])
         document_types = options.get("document_types", [])
         tags = options.get("tags", [])
+        custom_fields: dict[str, list[str]] = options.get("custom_fields", {})
 
         lines: list[str] = [
             "Available filter options:",
@@ -75,4 +76,11 @@ class AgentToolListFilterOptions(AgentToolInterface):
             "Document types: %s" % (", ".join(document_types) if document_types else "(none)"),
             "Tags: %s" % (", ".join(tags) if tags else "(none)"),
         ]
+
+        # append one line per custom field so the agent knows which values are selectable
+        for field_name, values in custom_fields.items():
+            lines.append(
+                "%s: %s" % (field_name, ", ".join(values) if values else "(none)")
+            )
+
         return AgentToolResult(observation="\n".join(lines))
