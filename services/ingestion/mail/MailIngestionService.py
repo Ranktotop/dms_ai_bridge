@@ -15,41 +15,9 @@ from shared.helper.HelperConfig import HelperConfig
 from shared.helper.HelperFile import HelperFile
 from services.ingestion.entities.DocumentMail import DocumentMail
 from services.ingestion.mail.helper.MailAccountConfigHelper import MailAccountConfig, MailFolderConfig
+from services.ingestion.mail.helper.MailIngestionJobManager import MailIngestionJobManager
 from services.ingestion.mail.helper.MailFetcher import MailFetcher
-from services.ingestion.mail.helper.MailParser import MailParser, ParsedMail, MailAttachmentInput
-
-
-@dataclass
-class _MailDocSpec:
-    """Carries all per-document metadata through the ingestion phases.
-
-    Created during _parse_messages and threaded through every phase so each
-    phase has the full context needed to act or roll back correctly.
-
-    Forced fields always win over LLM output (body documents: email header values are
-    authoritative). Fallback fields are used only when the LLM extracted nothing
-    (attachment documents: email header provides a meaningful last resort).
-    """
-
-    source_file: str                     # absolute path to the temp file (body .txt/.md or attachment)
-    owner_id: int                        # DMS owner_id resolved from the recipient mapping
-    folder: MailFolderConfig             # folder config providing document_type and tag hints
-    content_prefix: str | None           # mail-context header prepended to content before DMS update
-    message_id: str                      # ties this doc to its parent message for rollback grouping
-    doc_idx: int                         # 1-based global index across all messages in this folder run
-    # forced: email header values that always win over LLM output (set for body documents)
-    forced_title: str | None = None
-    forced_correspondent: str | None = None
-    forced_year: str | None = None
-    forced_month: str | None = None
-    forced_day: str | None = None
-    # fallback: email header values used only when LLM extracted nothing (set for attachments)
-    fallback_title: str | None = None
-    fallback_correspondent: str | None = None
-    fallback_year: str | None = None
-    fallback_month: str | None = None
-    fallback_day: str | None = None
-    custom_fields: dict[str, str] = field(default_factory=dict)   # arbitrary DMS custom fields to set on the document
+from services.ingestion.mail.helper.MailParser import ParsedMail, MailAttachmentInput
 
 
 class MailIngestionService:
@@ -95,8 +63,16 @@ class MailIngestionService:
         self._prompt_client = prompt_client
 
         self._helper_file = HelperFile()
-        self._fetcher = MailFetcher(helper_config=helper_config, cache_client=cache_client)
-        self._parser = MailParser(helper_config=helper_config)
+        self._fetcher = MailFetcher(helper_config=helper_config)
+        self._jobmanager = MailIngestionJobManager(
+            helper_config=helper_config, 
+            working_dir=self._helper_file.generate_tempfolder(path_only=True),
+            dms_client=dms_client,
+            llm_client=llm_client,
+            cache_client=cache_client,
+            ocr_client=ocr_client,
+            prompt_client=prompt_client
+        )
 
     ##########################################
     ############# INGESTION ##################
@@ -122,337 +98,26 @@ class MailIngestionService:
         """
         self.logging.info("Processing folder '%s' on account '%s'.", folder.path, account.id)
 
-        messages, total_unprocessed = await self._fetcher.fetch_unprocessed(
-            account=account, folder=folder, batch_size=batch_size,
-        )
+        # fetch all mails by using mail fetcher
+        messages = self._fetcher.fetch_all_mails(account=account, folder=folder)        
         if not messages:
-            self.logging.info(
-                "No unprocessed messages in folder '%s' on account '%s'.",
-                folder.path, account.id,
-            )
             return
+        self.logging.info("Found %d message(s) in folder '%s' on account '%s'.",len(messages), folder.path, account.id,)
 
-        if batch_size > 0 and total_unprocessed > len(messages):
-            # batch limit is active — show both batch count and total backlog
-            self.logging.info(
-                "Found %d unprocessed message(s) in folder '%s' on account '%s' "
-                "— processing %d this run (%d remaining after).",
-                total_unprocessed, folder.path, account.id,
-                len(messages), total_unprocessed - len(messages),
+        # iterate messages and create MailIngestionJobs. 
+        for message_id, raw_bytes in messages.items():
+            self._jobmanager.add_message(
+                inbox_message_id=message_id,
+                raw_bytes=raw_bytes,
+                account=account,
+                folder=folder
             )
-        else:
-            self.logging.info(
-                "Found %d unprocessed message(s) in folder '%s' on account '%s'.",
-                total_unprocessed, folder.path, account.id,
-            )
-
-        all_specs, message_doc_map = self._parse_messages(
-            messages=messages,
-            account=account,
-            folder=folder,
-        )
-        if not all_specs:
-            # all messages failed to parse — nothing to ingest
-            return
-
-        await self._ingest_batch(
-            all_specs=all_specs,
-            message_doc_map=message_doc_map,
-            total_unprocessed=total_unprocessed,
-        )
-
-    def _parse_messages(
-        self,
-        messages: list[tuple[str, bytes]],
-        account: MailAccountConfig,
-        folder: MailFolderConfig,
-    ) -> tuple[list[_MailDocSpec], dict[str, list[int]]]:
-        """Parse all raw messages into _MailDocSpec entries and write temp files.
-
-        Iterates over every (message_id, raw_bytes) pair.  For each message a
-        body spec and one spec per allowed attachment are created.  Temp files
-        are written here so that DocumentMail can be booted without further I/O
-        in _ingest_batch.
-
-        doc_idx is assigned globally across all messages so the progress prefix
-        is meaningful even when messages have different numbers of documents.
-
-        Args:
-            messages: List of (message_id, raw_bytes) tuples from MailFetcher.
-            account: Mail account config (attachment extensions, ingest_body, etc.).
-            folder: Folder config for document_type and tag hints.
-
-        Returns:
-            Tuple of:
-              - all_specs: flat list of _MailDocSpec for every document
-              - message_doc_map: message_id → list of indices into all_specs
-        """
-        all_specs: list[_MailDocSpec] = []
-        message_doc_map: dict[str, list[int]] = {}
-        # global doc index across all messages — starts at 1 for progress display
-        doc_idx = 1
-
-        for message_id, raw_bytes in messages:
-            try:
-                specs = self._parse_single_message(
-                    message_id=message_id,
-                    raw_bytes=raw_bytes,
-                    account=account,
-                    folder=folder,
-                    start_doc_idx=doc_idx,
-                )
-            except Exception as e:
-                self.logging.warning(
-                    "Failed to parse message '%s', skipping: %s", message_id, e
-                )
-                continue
-
-            if not specs:
-                # message produced no ingestion targets (e.g. no body and no valid attachments)
-                self.logging.warning(
-                    "Message '%s' produced no ingestion targets, skipping.", message_id
-                )
-                continue
-
-            indices = list(range(len(all_specs), len(all_specs) + len(specs)))
-            message_doc_map[message_id] = indices
-            all_specs.extend(specs)
-            doc_idx += len(specs)
-
-        # now that the real total is known, update every spec with the correct doc_idx width
-        # (no re-numbering needed — doc_idx values were assigned sequentially from 1)
-        return all_specs, message_doc_map
-
-    def _parse_single_message(
-        self,
-        message_id: str,
-        raw_bytes: bytes,
-        account: MailAccountConfig,
-        folder: MailFolderConfig,
-        start_doc_idx: int,
-    ) -> list[_MailDocSpec]:
-        """Parse one raw email message into a list of _MailDocSpec entries.
-
-        Resolves owner_id from the recipient mapping, then calls MailParser.
-        Writes temp files for body and each attachment.
-
-        Args:
-            message_id: Unique identifier for the message (Message-ID or UID fallback).
-            raw_bytes: Complete RFC 2822 email as bytes.
-            account: Mail account config.
-            folder: IMAP folder config.
-            start_doc_idx: 1-based global index for the first document of this message.
-
-        Returns:
-            List of _MailDocSpec entries (may be empty when no content is found).
-        """
-        # resolve owner_id by scanning To/Cc/Delivered-To/X-Original-To headers
-        owner_id = self._resolve_owner_id(raw_bytes=raw_bytes, account=account)
-
-        parsed_mail = self._parser.parse(
-            raw_bytes=raw_bytes,
-            owner_id=owner_id,
-            attachment_extensions=account.attachment_extensions,
-            ingest_body=account.ingest_body,
-        )
-
-        specs: list[_MailDocSpec] = []
-        current_idx = start_doc_idx
-
-        # body spec — write body to a temp .txt or .md file
-        if parsed_mail.mail_content is not None:
-            body_spec = self._build_body_spec(
-                parsed_mail=parsed_mail,
-                folder=folder,
-                message_id=message_id,
-                doc_idx=current_idx,
-            )
-            specs.append(body_spec)
-            current_idx += 1
-
-        # attachment specs — write each attachment to a temp file with the original extension
-        for attachment in parsed_mail.attachments:
-            attach_spec = self._build_attachment_spec(
-                attachment=attachment,
-                parsed_mail=parsed_mail,
-                folder=folder,
-                message_id=message_id,
-                doc_idx=current_idx,
-            )
-            specs.append(attach_spec)
-            current_idx += 1
-
-        return specs
-
-    def _resolve_owner_id(self, raw_bytes: bytes, account: MailAccountConfig) -> int:
-        """Resolve the DMS owner_id from the email's recipient headers.
-
-        Scans To, Cc, Delivered-To, and X-Original-To headers in order.
-        Returns the first match found in account.recipient_mapping, or falls
-        back to account.default_owner_id when no match is found.
-
-        Args:
-            raw_bytes: Complete RFC 2822 email bytes.
-            account: Mail account config with recipient_mapping and default_owner_id.
-
-        Returns:
-            Resolved DMS owner_id.
-        """
-        msg = _email.message_from_bytes(raw_bytes)
-        for header in ("To", "Cc", "Delivered-To", "X-Original-To"):
-            raw_val = msg.get(header, "")
-            if not raw_val:
-                continue
-            for addr in raw_val.split(","):
-                addr = addr.strip()
-                # extract bare address from "Display Name <addr@example.com>" format
-                if "<" in addr and ">" in addr:
-                    addr = addr[addr.index("<") + 1:addr.index(">")]
-                addr = addr.strip().lower()
-                if addr in account.recipient_mapping:
-                    return account.recipient_mapping[addr]
-
-        # no match in any recipient header — use the account-level default
-        return account.default_owner_id
-
-    def _build_body_spec(
-        self,
-        parsed_mail: ParsedMail,
-        folder: MailFolderConfig,
-        message_id: str,
-        doc_idx: int,
-    ) -> _MailDocSpec:
-        """Write the mail body to a temp file and build its _MailDocSpec.
-
-        Prefers Markdown content when quality gates pass; falls back to plain text
-        so the Document class can read it as a native text format.
-
-        Args:
-            parsed_mail: Fully parsed mail with body content and header metadata.
-            folder: Folder config for document_type and tag hints.
-            message_id: Parent message identifier for rollback grouping.
-            doc_idx: 1-based global document index for progress logs.
-
-        Returns:
-            _MailDocSpec with source_file pointing to the written temp file.
-        """
-        mail_content = parsed_mail.mail_content
-        # prefer Markdown when quality gates pass — plain text is the safe fallback
-        using_markdown = mail_content.is_valid_markdown()
-        ingestion_content = (
-            mail_content.markdown_content if using_markdown else mail_content.content
-        )
-        suffix = ".md" if using_markdown else ".txt"
-
-        clean_subject = self._clean_subject(parsed_mail.subject)
-        # full sender display (name + email) gives more context than name alone in the prefix
-        sender_display = self._format_sender(parsed_mail.sender_name, parsed_mail.sender_mail)
-        # bare name/address for the correspondent fallback field — same logic as before
-        sender = parsed_mail.sender_name or parsed_mail.sender_mail
-
-        # one-line header prepended to the content so RAG chunks carry full mail context
-        # even for PDF attachments that contain no reference to their origin mail
-        content_prefix = "[E-Mail | Von: %s | Betreff: %s | Datum: %04d.%02d.%02d]" % (
-            sender_display, clean_subject, parsed_mail.year, parsed_mail.month, parsed_mail.day
-        )
-
-        # store sender email as a searchable custom field — the display name (correspondent)
-        # can be ambiguous, but the email address uniquely identifies the sender
-        custom_fields: dict[str, str] = {}
-        if parsed_mail.sender_mail:
-            custom_fields[self._get_sender_email_field_name()] = parsed_mail.sender_mail
-
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=suffix, delete=False, encoding="utf-8", prefix="mail_body_"
-        ) as tmp_file:
-            tmp_file.write(ingestion_content)
-            tmp_path = tmp_file.name
-
-        return _MailDocSpec(
-            source_file=tmp_path,
-            owner_id=parsed_mail.owner_id,
-            folder=folder,
-            content_prefix=content_prefix,
-            message_id=message_id,
-            doc_idx=doc_idx,
-            # body: email header values are authoritative — all forced, none are fallbacks
-            forced_title=parsed_mail.subject,
-            forced_correspondent=sender or None,
-            forced_year=parsed_mail.year,
-            forced_month=parsed_mail.month,
-            forced_day=parsed_mail.day,
-            custom_fields=custom_fields,
-        )
-
-    def _build_attachment_spec(
-        self,
-        attachment: MailAttachmentInput,
-        parsed_mail: ParsedMail,
-        folder: MailFolderConfig,
-        message_id: str,
-        doc_idx: int,
-    ) -> _MailDocSpec:
-        """Write an attachment to a temp file and build its _MailDocSpec.
-
-        The attachment title links to the parent mail via the subject prefix.
-        A content_prefix is set so the first RAG chunk always carries sender +
-        subject, making the attachment discoverable via mail-level queries.
-
-        Args:
-            attachment: Parsed attachment data (bytes + filename).
-            parsed_mail: Parent mail providing header metadata for fallbacks.
-            folder: Folder config for document_type and tag hints.
-            message_id: Parent message identifier for rollback grouping.
-            doc_idx: 1-based global document index for progress logs.
-
-        Returns:
-            _MailDocSpec with source_file pointing to the written temp file.
-        """
-        clean_subject = self._clean_subject(parsed_mail.subject)
-        # full sender display (name + email) gives more context than name alone in the prefix
-        sender_display = self._format_sender(parsed_mail.sender_name, parsed_mail.sender_mail)
-        # bare name/address for the correspondent fallback field — same logic as before
-        sender = parsed_mail.sender_name or parsed_mail.sender_mail
-
-        # one-line header prepended to the content so RAG chunks carry full mail context
-        # even for PDF attachments that contain no reference to their origin mail
-        content_prefix = "[E-Mail | Von: %s | Betreff: %s | Datum: %04d.%02d.%02d]" % (
-            sender_display, clean_subject, parsed_mail.year, parsed_mail.month, parsed_mail.day
-        )
-
-        # store sender email as a searchable custom field — the display name (correspondent)
-        # can be ambiguous, but the email address uniquely identifies the sender
-        custom_fields: dict[str, str] = {}
-        if parsed_mail.sender_mail:
-            custom_fields[self._get_sender_email_field_name()] = parsed_mail.sender_mail
-
-        # preserve the original file extension so DocumentConverter picks the right path
-        _, ext = os.path.splitext(attachment.filename)
-        with tempfile.NamedTemporaryFile(
-            suffix=ext, delete=False, prefix="mail_attach_"
-        ) as tmp_file:
-            tmp_file.write(attachment.file_bytes)
-            tmp_path = tmp_file.name
-
-        return _MailDocSpec(
-            source_file=tmp_path,
-            owner_id=parsed_mail.owner_id,
-            folder=folder,
-            content_prefix=content_prefix,
-            message_id=message_id,
-            doc_idx=doc_idx,
-            # attachment: LLM has first say on all metadata; email header values are fallbacks only
-            fallback_title="%s — %s" % (clean_subject, attachment.filename),
-            fallback_correspondent=sender,
-            fallback_year=parsed_mail.year,
-            fallback_month=parsed_mail.month,
-            fallback_day=parsed_mail.day,
-            custom_fields=custom_fields,
-        )
-
+        
+        # now run the process
+        self._jobmanager.run_jobs(batch_size=batch_size)
+    
     async def _ingest_batch(
         self,
-        all_specs: list[_MailDocSpec],
         message_doc_map: dict[str, list[int]],
         total_unprocessed: int = 0,
     ) -> None:
@@ -872,68 +537,3 @@ class MailIngestionService:
             self.logging.warning("Rolled back DMS document id=%d.", doc_id, color="yellow")
         except Exception as e:
             self.logging.error("Rollback: failed to delete DMS document id=%d: %s", doc_id, e)
-
-    ##########################################
-    ############# HELPERS ####################
-    ##########################################
-
-    def _get_sender_email_field_name(self) -> str:
-        """
-        Returns the DMS custom field name used to store the sender email address.
-
-        Returns:
-            str: The field name string used as the key in custom_fields dicts.
-        """
-        return "Sender Email"
-
-    def _format_sender(self, name: str | None, mail: str | None) -> str:
-        """
-        Formats a sender display string combining name and email address.
-
-        Args:
-            name (str | None): Display name of the sender.
-            mail (str | None): Email address of the sender.
-
-        Returns:
-            str: Formatted string — 'Name <email>' if both present, otherwise whichever is available.
-        """
-        if name and mail:
-            return "%s <%s>" % (name, mail)
-        return name or mail or ""
-
-    def _progress_prefix(self, current: int, total: int) -> str:
-        """Return a zero-padded progress prefix like '[012/100]' for log messages.
-
-        Zero-padding the current index to the width of the total keeps log lines
-        aligned when the total reaches three or more digits.
-
-        Args:
-            current: 1-based index of the current item.
-            total: Total number of items in this run.
-
-        Returns:
-            Formatted prefix string, e.g. '[01/10]'.
-        """
-        width = len(str(total))
-        return "[%s/%d]" % (str(current).zfill(width), total)
-
-    def _clean_subject(self, subject: str) -> str:
-        """Strip common reply/forward prefixes from an email subject line.
-
-        Removes RE:/FW:/AW:/WG: prefixes (case-insensitive, applied repeatedly)
-        so the resulting string is suitable as a title prefix without noise.
-
-        Args:
-            subject: Raw email subject string.
-
-        Returns:
-            Subject with all leading reply/forward prefixes removed.
-        """
-        # apply repeatedly because subjects can be nested: "Re: Fw: Re: Invoice"
-        cleaned = subject
-        while True:
-            stripped = re.sub(r"^(RE|FW|AW|WG)\s*:\s*", "", cleaned, flags=re.IGNORECASE).strip()
-            if stripped == cleaned:
-                break
-            cleaned = stripped
-        return cleaned

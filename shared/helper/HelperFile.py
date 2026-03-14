@@ -445,6 +445,26 @@ class HelperFile:
             logging.error(f"Error writing text file \"{path}\"! -> "+str(e))
             return None
 
+    def write_file_bytes(self, data: bytes, path: str) -> Union[str, None]:
+        """
+        Create binary file with given content
+
+        :param data: The content of destination file
+        :type data: bytes
+        :param path: The path of destination file
+        :type path: str
+        :return: The relative output path on success, None otherwise
+        :rtype: Union[str,None]
+        """
+        path = self._convert_path(path, True)
+        try:
+            with open(path, "wb") as file:
+                file.write(data)
+            return path
+        except OSError as e:
+            logging.error(f"Error writing binary file \"{path}\"! -> "+str(e))
+            return None
+
     def write_json_file(self, data: dict, path: str) -> Union[str, None]:
         """
         Create text file with given content
